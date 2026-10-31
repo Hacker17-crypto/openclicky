@@ -2,25 +2,30 @@
 //  ElevenLabsTTSClient.swift
 //  leanring-buddy
 //
-//  Streams text-to-speech audio from ElevenLabs and plays it back
-//  through the system audio output. Uses the streaming endpoint so
-//  playback begins before the full audio has been generated.
+//  Optional text-to-speech via ElevenLabs using the user's OWN API key
+//  (set ElevenLabsAPIKey / ElevenLabsVoiceID in Info.plist). Calls the
+//  ElevenLabs API directly; there is no proxy server.
 //
 
 import AVFoundation
 import Foundation
 
 @MainActor
-final class ElevenLabsTTSClient {
-    private let proxyURL: URL
+final class ElevenLabsTTSClient: CompanionTextToSpeechClient {
+    /// ElevenLabs' stock "Rachel" voice, used when no ElevenLabsVoiceID is configured.
+    static let defaultVoiceID = "21m00Tcm4TlvDq8ikWAM"
+
+    private let apiKey: String
+    private let textToSpeechURL: URL
     private let session: URLSession
 
     /// The audio player for the current TTS playback. Kept alive so the
     /// audio finishes playing even if the caller doesn't hold a reference.
     private var audioPlayer: AVAudioPlayer?
 
-    init(proxyURL: String) {
-        self.proxyURL = URL(string: proxyURL)!
+    init(apiKey: String, voiceID: String) {
+        self.apiKey = apiKey
+        self.textToSpeechURL = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)")!
 
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30
@@ -31,8 +36,9 @@ final class ElevenLabsTTSClient {
     /// Sends `text` to ElevenLabs TTS and plays the resulting audio.
     /// Throws on network or decoding errors. Cancellation-safe.
     func speakText(_ text: String) async throws {
-        var request = URLRequest(url: proxyURL)
+        var request = URLRequest(url: textToSpeechURL)
         request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
 

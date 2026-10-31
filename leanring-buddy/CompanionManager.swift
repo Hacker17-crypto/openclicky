@@ -10,7 +10,6 @@
 import AVFoundation
 import Combine
 import Foundation
-import PostHog
 import ScreenCaptureKit
 import SwiftUI
 
@@ -68,17 +67,20 @@ final class CompanionManager: ObservableObject {
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
-    /// Base URL for the Cloudflare Worker proxy. All API requests route
-    /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
-
-    private lazy var claudeAPI: ClaudeAPI = {
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
+    /// Claude is reached through the user's locally installed Claude Code CLI,
+    /// so there is no server, no proxy and no API key in OpenClicky.
+    private lazy var claudeAPI: ClaudeCodeCLIClient = {
+        return ClaudeCodeCLIClient(model: selectedModel)
     }()
 
-    private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
-        return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
+    /// macOS on-device voice by default; ElevenLabs only if the user adds their own key.
+    private lazy var elevenLabsTTSClient: any CompanionTextToSpeechClient = {
+        return CompanionTextToSpeechClientFactory.makeDefaultClient()
     }()
+
+    /// nil until checked on launch. False means `claude` couldn't be found,
+    /// and the panel shows setup instructions.
+    @Published private(set) var isClaudeCodeCLIInstalled: Bool?
 
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
@@ -107,8 +109,9 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    /// The Claude Code model alias used for voice responses ("sonnet" or "opus").
+    /// Persisted to UserDefaults.
+    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "sonnet"
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
@@ -146,42 +149,27 @@ final class CompanionManager: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
     }
 
-    /// Whether the user has submitted their email during onboarding.
-    @Published var hasSubmittedEmail: Bool = UserDefaults.standard.bool(forKey: "hasSubmittedEmail")
-
-    /// Submits the user's email to FormSpark and identifies them in PostHog.
-    func submitEmail(_ email: String) {
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedEmail.isEmpty else { return }
-
-        hasSubmittedEmail = true
-        UserDefaults.standard.set(true, forKey: "hasSubmittedEmail")
-
-        // Identify user in PostHog
-        PostHogSDK.shared.identify(trimmedEmail, userProperties: [
-            "email": trimmedEmail
-        ])
-
-        // Submit to FormSpark
+    /// Checks whether the Claude Code CLI is installed and publishes the result
+    /// for the panel. Called on launch and whenever the panel wants to re-check.
+    func refreshClaudeCodeCLIAvailability() {
         Task {
-            var request = URLRequest(url: URL(string: "https://submit-form.com/RWbGJxmIs")!)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["email": trimmedEmail])
-            _ = try? await URLSession.shared.data(for: request)
+            let isInstalled = await ClaudeCodeCLIClient.isInstalled()
+            self.isClaudeCodeCLIInstalled = isInstalled
+            print("🤖 Claude Code CLI installed: \(isInstalled)")
         }
     }
 
     func start() {
         refreshAllPermissions()
-        print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
+        print("🔑 OpenClicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
-        // Eagerly touch the Claude API so its TLS warmup handshake completes
-        // well before the onboarding demo fires at ~40s into the video.
-        _ = claudeAPI
+        // Locate the `claude` binary (and the user's login-shell PATH) up front
+        // so the first push-to-talk doesn't pay for the lookup.
+        ClaudeCodeCLIClient.warmUpInstallationLookupInBackground()
+        refreshClaudeCodeCLIAvailability()
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -208,7 +196,7 @@ final class CompanionManager: ObservableObject {
 
         ClickyAnalytics.trackOnboardingStarted()
 
-        // Play Besaid theme at 60% volume, fade out after 1m 30s
+        // Plays onboarding.mp3 if you add one to the bundle (none ships with OpenClicky)
         startOnboardingMusic()
 
         // Show the overlay for the first time — isFirstAppearance triggers
@@ -239,8 +227,11 @@ final class CompanionManager: ObservableObject {
 
     private func startOnboardingMusic() {
         stopOnboardingMusic()
-        guard let musicURL = Bundle.main.url(forResource: "ff", withExtension: "mp3") else {
-            print("⚠️ Clicky: ff.mp3 not found in bundle")
+        // Upstream Clicky bundled a copyrighted game soundtrack here. OpenClicky
+        // doesn't redistribute it — drop your own onboarding.mp3 into the
+        // leanring-buddy folder if you want onboarding music.
+        guard let musicURL = Bundle.main.url(forResource: "onboarding", withExtension: "mp3") else {
+            print("🎵 OpenClicky: no onboarding.mp3 in bundle, skipping music")
             return
         }
 
@@ -255,7 +246,7 @@ final class CompanionManager: ObservableObject {
                 self?.fadeOutOnboardingMusic()
             }
         } catch {
-            print("⚠️ Clicky: Failed to play onboarding music: \(error)")
+            print("⚠️ OpenClicky: Failed to play onboarding music: \(error)")
         }
     }
 
@@ -542,7 +533,7 @@ final class CompanionManager: ObservableObject {
     // MARK: - Companion Prompt
 
     private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're openclicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
@@ -706,8 +697,8 @@ final class CompanionManager: ObservableObject {
                         voiceState = .responding
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
-                        speakCreditsErrorFallback()
+                        print("⚠️ TTS error: \(error)")
+                        speakErrorFallback(for: error)
                     }
                 }
             } catch is CancellationError {
@@ -715,7 +706,7 @@ final class CompanionManager: ObservableObject {
             } catch {
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
+                speakErrorFallback(for: error)
             }
 
             if !Task.isCancelled {
@@ -755,11 +746,23 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Speaks a hardcoded error message using macOS system TTS when API
-    /// credits run out. Uses NSSpeechSynthesizer so it works even when
-    /// ElevenLabs is down.
-    private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+    /// Speaks a short, actionable error using macOS system TTS. Uses
+    /// NSSpeechSynthesizer directly so it works even if the TTS client failed.
+    private func speakErrorFallback(for error: Error) {
+        let utterance: String
+        if let claudeCodeError = error as? ClaudeCodeCLIError {
+            switch claudeCodeError.kind {
+            case .executableNotFound:
+                utterance = "I can't find Claude Code on this Mac. Install it, run claude once in Terminal to log in, then try again."
+                isClaudeCodeCLIInstalled = false
+            case .notAuthenticated:
+                utterance = "Claude Code isn't logged in. Open Terminal, run claude, and log in, then try again."
+            case .requestFailed:
+                utterance = "Claude Code ran into a problem. Check that you haven't hit your usage limit, then try again."
+            }
+        } else {
+            utterance = "Something went wrong talking to Claude Code. Try again in a moment."
+        }
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
@@ -824,58 +827,23 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Onboarding Video
 
-    /// Sets up the onboarding video player, starts playback, and schedules
-    /// the demo interaction at 40s. Called by BlueCursorView when onboarding starts.
+    /// Runs the onboarding sequence after the welcome animation. Upstream
+    /// Clicky streamed a personal intro video from the original author's
+    /// video host here; OpenClicky has no server, so instead it goes
+    /// straight to the pointing demo and then the "try talking" prompt.
+    /// Called by BlueCursorView when onboarding starts.
     func setupOnboardingVideo() {
-        guard let videoURL = URL(string: "https://stream.mux.com/e5jB8UuSrtFABVnTHCR7k3sIsmcUHCyhtLu1tzqLlfs.m3u8") else { return }
+        showOnboardingVideo = false
 
-        let player = AVPlayer(url: videoURL)
-        player.isMuted = false
-        player.volume = 0.0
-        self.onboardingVideoPlayer = player
-        self.showOnboardingVideo = true
-        self.onboardingVideoOpacity = 0.0
-
-        // Start playback immediately — the video plays while invisible,
-        // then we fade in both the visual and audio over 1s.
-        player.play()
-
-        // Wait for SwiftUI to mount the view, then set opacity to 1.
-        // The .animation modifier on the view handles the actual animation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.onboardingVideoOpacity = 1.0
-            // Fade audio volume from 0 → 1 over 2s to match visual fade
-            self.fadeInVideoAudio(player: player, targetVolume: 1.0, duration: 2.0)
-        }
-
-        // At 40 seconds into the video, trigger the onboarding demo where
-        // Clicky flies to something interesting on screen and comments on it
-        let demoTriggerTime = CMTime(seconds: 40, preferredTimescale: 600)
-        onboardingDemoTimeObserver = player.addBoundaryTimeObserver(
-            forTimes: [NSValue(time: demoTriggerTime)],
-            queue: .main
-        ) { [weak self] in
+        // Give the welcome animation a moment to finish, then show off pointing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             ClickyAnalytics.trackOnboardingDemoTriggered()
             self?.performOnboardingDemoInteraction()
         }
 
-        // Fade out and clean up when the video finishes
-        onboardingVideoEndObserver = NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.didPlayToEndTimeNotification,
-            object: player.currentItem,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            ClickyAnalytics.trackOnboardingVideoCompleted()
-            self.onboardingVideoOpacity = 0.0
-            // Wait for the 2s fade-out animation to complete before tearing down
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.tearDownOnboardingVideo()
-                // After the video disappears, stream in the prompt to try talking
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self.startOnboardingPromptStream()
-                }
-            }
+        // Once the demo has had time to fly, point and return, invite the user to talk.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
+            self?.startOnboardingPromptStream()
         }
     }
 
@@ -948,7 +916,7 @@ final class CompanionManager: ObservableObject {
     // MARK: - Onboarding Demo Interaction
 
     private static let onboardingDemoSystemPrompt = """
-    you're clicky, a small blue cursor buddy living on the user's screen. you're showing off during onboarding — look at their screen and find ONE specific, concrete thing to point at. pick something with a clear name or identity: a specific app icon (say its name), a specific word or phrase of text you can read, a specific filename, a specific button label, a specific tab title, a specific image you can describe. do NOT point at vague things like "a window" or "some text" — be specific about exactly what you see.
+    you're openclicky, a small blue cursor buddy living on the user's screen. you're showing off during onboarding — look at their screen and find ONE specific, concrete thing to point at. pick something with a clear name or identity: a specific app icon (say its name), a specific word or phrase of text you can read, a specific filename, a specific button label, a specific tab title, a specific image you can describe. do NOT point at vague things like "a window" or "some text" — be specific about exactly what you see.
 
     make a short quirky 3-6 word observation about the specific thing you picked — something fun, playful, or curious that shows you actually read/recognized it. no emojis ever. NEVER quote or repeat text you see on screen — just react to it. keep it to 6 words max, no exceptions.
 
