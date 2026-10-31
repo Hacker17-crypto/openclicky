@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    OpenClicky for Windows: a tray app (no main window) that lives next to the
+    cursor. Code-only WPF (no XAML) referenced through FrameworkReference, so it
+    also compiles on Linux/macOS with EnableWindowsTargeting (it only runs on Windows).
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>OpenClicky</RootNamespace>
+    <AssemblyName>OpenClicky</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>OpenClicky.ico</ApplicationIcon>
+    <Version>0.1.0</Version>
+    <Product>OpenClicky</Product>
+    <Description>An AI buddy next to your cursor, powered by your local Claude Code.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="System.Speech" Version="8.0.0" />
+    <!-- whisper.cpp for .NET: runs Whisper ggml models in-process (CPU, with AVX/NEON). -->
+    <PackageReference Include="Whisper.net" Version="1.7.4" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.7.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="OpenClicky.ico" />
+  </ItemGroup>
+</Project>
