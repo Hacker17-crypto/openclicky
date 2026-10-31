@@ -6,3 +6,5 @@ build/
 releases/
 .claude/
 coding-plans/
+build-xcodebuild.log
+OpenClicky.dmg

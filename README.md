@@ -58,6 +58,16 @@ Say "agent, ..." to skip straight to an agent. Results land in `~/OpenClicky/<da
 
 Grab **OpenClicky.dmg** from this repo's [Releases](../../releases) page (the `latest` release is rebuilt automatically from every push to `main` by `.github/workflows/build-macos.yml`).
 
+### Or build the DMG yourself
+
+On a Mac with Xcode 26+, run:
+
+```bash
+./scripts/build-dmg.sh
+```
+
+It produces `OpenClicky.dmg` in the project folder. (Private GitHub repos have limited free macOS build minutes; public repos build for free.)
+
 ### Installing the download
 
 1. Open the DMG and drag **OpenClicky** into **Applications**.
