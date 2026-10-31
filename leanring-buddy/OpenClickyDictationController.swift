@@ -185,6 +185,9 @@ final class OpenClickyDictationController {
                     .map { (data: $0.imageData, label: $0.label) }
 
                 var userPrompt = instruction
+                if let contextDescription = FocusedAppContextReader.readCurrentContext().promptDescription {
+                    userPrompt += "\n\n" + contextDescription
+                }
                 let profileText = OpenClickySettings.shared.isMemoryEnabled ? OpenClickyMemoryStore.readProfileText() : ""
                 if !profileText.isEmpty {
                     userPrompt += "\n\n(about me, for context:\n\(profileText))"

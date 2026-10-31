@@ -16,7 +16,7 @@
 import AVFoundation
 import Foundation
 
-struct WhisperCppTranscriptionProviderError: LocalizedError {
+nonisolated struct WhisperCppTranscriptionProviderError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
 }
@@ -27,8 +27,10 @@ final class WhisperCppTranscriptionProvider: BuddyTranscriptionProvider {
 
     var displayName: String {
         guard let modelURL else { return "Whisper (local)" }
-        let modelName = modelURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "ggml-", with: "")
-        return "Whisper \(modelName)"
+        if let inspectedModel = WhisperModelFileInspector.inspectModel(at: modelURL, sourceName: "") {
+            return "Whisper \(inspectedModel.displayName)"
+        }
+        return "Whisper (local)"
     }
 
     let requiresSpeechRecognitionPermission = false
@@ -183,7 +185,9 @@ nonisolated private final class WhisperCppTranscriptionSession: BuddyStreamingTr
 
     private func runWhisper(wavFileURL: URL, outputBaseURL: URL) throws -> String {
         let modelFileName = modelURL.deletingPathExtension().lastPathComponent
-        let isEnglishOnlyModel = modelFileName.hasSuffix(".en") || modelFileName.contains(".en-")
+        // Read the model header rather than trusting the file name (other apps rename models).
+        let isEnglishOnlyModel = WhisperModelFileInspector.inspectModel(at: modelURL, sourceName: "")?.isEnglishOnly
+            ?? (modelFileName.hasSuffix(".en") || modelFileName.contains(".en-"))
         let threadCount = max(2, min(8, ProcessInfo.processInfo.activeProcessorCount - 2))
 
         var whisperArguments = [

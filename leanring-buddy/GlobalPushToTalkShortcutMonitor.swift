@@ -33,6 +33,9 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     }
     /// Mouse drags made while the talk shortcut is held.
     let inkEventPublisher = PassthroughSubject<InkEvent, Never>()
+    /// Escape pressed anywhere (passed through to the app too). Used to stop OpenClicky talking.
+    let escapeKeyPublisher = PassthroughSubject<Void, Never>()
+    private static let escapeKeyCode: UInt16 = 53
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
@@ -194,6 +197,10 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+        if eventType == .keyDown && eventKeyCode == Self.escapeKeyCode {
+            escapeKeyPublisher.send(())
+        }
         let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,

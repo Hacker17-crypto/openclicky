@@ -116,9 +116,12 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var currentCaptionText: String?
     private var screenAnnotationClearTask: Task<Void, Never>?
 
-    /// Text already handed to TTS while a visual was still streaming in, so the
-    /// reply isn't spoken twice when the full response arrives.
+    /// Text already handed to TTS while the reply was still streaming in, so it
+    /// isn't spoken twice when the full response arrives.
     private var earlySpokenResponseText: String?
+    /// Splits the streaming reply into sentences so speech starts before Claude finishes.
+    private var streamingSpeechSegmenter = StreamingSpeechSegmenter()
+    private var escapeKeyCancellable: AnyCancellable?
 
     /// nil until checked on launch. False means `claude` couldn't be found,
     /// and the panel shows setup instructions.
@@ -219,6 +222,7 @@ final class CompanionManager: ObservableObject {
         bindDictationShortcutTransitions()
         bindAgentNotifications()
         bindUserInk()
+        bindEscapeKey()
         _ = statusPillPanelManager
         askForTranscriptionEngineIfNeeded()
         // Locate the `claude` binary (and the user's login-shell PATH) up front
@@ -527,6 +531,9 @@ final class CompanionManager: ObservableObject {
             clearScreenAnnotations()
             userInkStrokes = []
             currentCaptionText = nil
+
+            // Boot Claude Code while the user is still talking (saves ~1s per answer).
+            claudeAPI.prewarmProcess(systemPrompt: makeVoiceResponseSystemPrompt())
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
@@ -640,6 +647,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
         earlySpokenResponseText = nil
+        streamingSpeechSegmenter = StreamingSpeechSegmenter()
 
         // "agent, ..." skips the conversation and goes straight to an agent.
         if let explicitAgentTask = Self.explicitAgentTask(fromTranscript: transcript) {
@@ -655,6 +663,7 @@ final class CompanionManager: ObservableObject {
                 // Capture all connected screens so the AI has full context, with
                 // anything the user drew while talking burned into the images.
                 let inkStrokesForThisQuestion = userInkStrokes
+                let focusedAppContext = FocusedAppContextReader.readCurrentContext()
                 let rawScreenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
                 let screenCaptures = inkStrokesForThisQuestion.isEmpty
                     ? rawScreenCaptures
@@ -679,13 +688,14 @@ final class CompanionManager: ObservableObject {
                     images: labeledImages,
                     systemPrompt: makeVoiceResponseSystemPrompt(),
                     conversationHistory: historyForAPI,
-                    userPrompt: inkStrokesForThisQuestion.isEmpty
-                        ? transcript
-                        : transcript + "\n\n(i drew on my screen in orange to show you what i mean.)",
+                    userPrompt: Self.makeUserPrompt(
+                        transcript: transcript,
+                        didUserDrawInk: !inkStrokesForThisQuestion.isEmpty,
+                        focusedAppContext: focusedAppContext
+                    ),
                     onTextChunk: { [weak self] accumulatedResponseText in
-                        // Spinner stays until TTS plays. If Claude starts drawing a
-                        // visual, speak the explanation now instead of waiting for it.
-                        self?.speakEarlyIfVisualHasStarted(accumulatedResponseText)
+                        // Start talking as soon as the first sentence is complete.
+                        self?.handleStreamedResponseText(accumulatedResponseText)
                     }
                 )
 
@@ -795,7 +805,18 @@ final class CompanionManager: ObservableObject {
 
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
-                let wasAlreadySpokenEarly = earlySpokenResponseText != nil
+                if elevenLabsTTSClient.supportsQueuedSpeech {
+                    // Speak whatever didn't fit into a complete sentence while streaming.
+                    if let remainingSpeech = streamingSpeechSegmenter.takeRemainder(from: fullResponseText) {
+                        elevenLabsTTSClient.enqueueText(remainingSpeech)
+                        voiceState = .responding
+                    }
+                    if streamingSpeechSegmenter.hasSpokenAnything {
+                        showCaptions(for: spokenText)
+                    }
+                }
+
+                let wasAlreadySpokenEarly = earlySpokenResponseText != nil || elevenLabsTTSClient.supportsQueuedSpeech
                 if !wasAlreadySpokenEarly && !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
                         try await elevenLabsTTSClient.speakText(spokenText)
@@ -933,12 +954,75 @@ final class CompanionManager: ObservableObject {
         let runningOrRecentAgents = agentManager.agents.prefix(5)
         if !runningOrRecentAgents.isEmpty {
             let agentSummaries = runningOrRecentAgents.map { agent in
-                "- \(agent.name): \(agent.taskDescription.prefix(120)) (\(agent.latestActivityText.prefix(80)))"
+                "- \(agent.name): \(agent.taskDescription.prefix(120))"
             }.joined(separator: "\n")
             systemPrompt += "\n\nagents currently on the user's screen:\n\(agentSummaries)"
         }
 
         return systemPrompt
+    }
+
+    /// Speaks complete sentences as they stream in (queued TTS), so OpenClicky starts
+    /// answering about a second after the user lets go instead of after the whole reply.
+    private func handleStreamedResponseText(_ accumulatedResponseText: String) {
+        guard elevenLabsTTSClient.supportsQueuedSpeech else {
+            // ElevenLabs plays one clip at a time; fall back to speaking once a visual starts.
+            speakEarlyIfVisualHasStarted(accumulatedResponseText)
+            return
+        }
+
+        guard let newlyCompletedSentences = streamingSpeechSegmenter.takeCompletedSentences(from: accumulatedResponseText) else {
+            return
+        }
+        elevenLabsTTSClient.enqueueText(newlyCompletedSentences)
+        earlySpokenResponseText = streamingSpeechSegmenter.spokenTextSoFar
+        voiceState = .responding
+        if OpenClickySettings.shared.showsCaptionsWhileTalking {
+            currentCaptionText = streamingSpeechSegmenter.spokenTextSoFar.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    /// The question plus anything that helps Claude understand it: what the user drew,
+    /// which app and window they're in, and any selected text.
+    private static func makeUserPrompt(transcript: String, didUserDrawInk: Bool, focusedAppContext: FocusedAppContext) -> String {
+        var userPrompt = transcript
+        if didUserDrawInk {
+            userPrompt += "\n\n(i drew on my screen in orange to show you what i mean.)"
+        }
+        if let contextDescription = focusedAppContext.promptDescription {
+            userPrompt += "\n\n" + contextDescription
+        }
+        return userPrompt
+    }
+
+    /// Escape stops OpenClicky mid-sentence and clears what it drew. Does nothing when it's idle,
+    /// so Escape keeps working normally in other apps.
+    private func bindEscapeKey() {
+        escapeKeyCancellable = globalPushToTalkShortcutMonitor.escapeKeyPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                guard let self else { return }
+                let isOpenClickyBusy = self.voiceState != .idle
+                    || self.elevenLabsTTSClient.isPlaying
+                    || !self.activeScreenAnnotations.isEmpty
+                    || !self.userInkStrokes.isEmpty
+                    || self.visualExplainerCardManager.hasOpenCards
+                guard isOpenClickyBusy else { return }
+
+                print("⎋ Escape: stopping OpenClicky")
+                if self.buddyDictationManager.isDictationInProgress {
+                    self.buddyDictationManager.cancelCurrentDictation(preserveDraftText: false)
+                }
+                self.currentResponseTask?.cancel()
+                self.currentResponseTask = nil
+                self.elevenLabsTTSClient.stopPlayback()
+                self.claudeAPI.discardPrewarmedProcess()
+                self.clearScreenAnnotations()
+                self.visualExplainerCardManager.closeAllCards()
+                self.currentCaptionText = nil
+                self.voiceState = .idle
+                self.scheduleTransientHideIfNeeded()
+            }
     }
 
     /// Called on every streamed chunk. Once Claude starts a <visual> block, the

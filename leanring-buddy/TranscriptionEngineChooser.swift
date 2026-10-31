@@ -208,7 +208,7 @@ struct TranscriptionEngineChooserView: View {
     @ViewBuilder
     private var whisperSetupSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if catalog.whisperExecutablePath == nil {
+            if !catalog.canRunWhisper {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Install whisper.cpp with Homebrew, then re-check:")
                         .font(.system(size: 12))
@@ -242,12 +242,45 @@ struct TranscriptionEngineChooserView: View {
                         }
                     )) {
                         ForEach(catalog.installedWhisperModels) { installedModel in
-                            Text("\(installedModel.displayName)  ·  \(ByteCountFormatter.string(fromByteCount: installedModel.sizeInBytes, countStyle: .file))")
+                            Text("\(installedModel.displayName)  ·  from \(installedModel.sourceName)  ·  \(ByteCountFormatter.string(fromByteCount: installedModel.sizeInBytes, countStyle: .file))")
                                 .tag(installedModel.fileURL.path)
                         }
                     }
                     .labelsHidden()
-                    .frame(maxWidth: 320)
+                    .frame(maxWidth: 400)
+
+                    if let selectedModel = catalog.installedWhisperModels.first(where: { $0.fileURL.path == catalog.selectedWhisperModelPath }) {
+                        Text(selectedModel.fileURL.path)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button(catalog.isScanning ? "Scanning..." : "Rescan for models") { catalog.refresh() }
+                    .controlSize(.small)
+                    .disabled(catalog.isScanning)
+                Text("Checks Superwhisper, MacWhisper, VoiceInk, Buzz, Hugging Face, Homebrew, Downloads, and Spotlight.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !catalog.incompatibleSpeechModels.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Also found, but in a format whisper.cpp can't run:")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(catalog.incompatibleSpeechModels.prefix(5)) { incompatibleModel in
+                        Text("• \(incompatibleModel.name) (\(incompatibleModel.formatName), \(incompatibleModel.sourceName))")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                 }
             }
 

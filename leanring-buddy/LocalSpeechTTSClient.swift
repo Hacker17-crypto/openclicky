@@ -20,6 +20,16 @@ protocol CompanionTextToSpeechClient: AnyObject {
     var isPlaying: Bool { get }
     /// Stops any in-progress playback immediately.
     func stopPlayback()
+    /// True when `enqueueText` can add sentences without interrupting the current one,
+    /// which lets OpenClicky start talking while Claude is still writing.
+    var supportsQueuedSpeech: Bool { get }
+    /// Speaks `text` after whatever is already queued.
+    func enqueueText(_ text: String)
+}
+
+extension CompanionTextToSpeechClient {
+    var supportsQueuedSpeech: Bool { false }
+    func enqueueText(_ text: String) {}
 }
 
 @MainActor
@@ -119,6 +129,18 @@ final class LocalSpeechTTSClient: NSObject, CompanionTextToSpeechClient {
         speechSynthesizer.stopSpeaking(at: .immediate)
     }
 
+    var supportsQueuedSpeech: Bool { true }
+
+    /// AVSpeechSynthesizer queues utterances, so sentences play back to back with natural pauses.
+    func enqueueText(_ text: String) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+        let utterance = AVSpeechUtterance(string: trimmedText)
+        utterance.voice = selectedVoice
+        utterance.rate = Self.userAdjustedSpeechRate
+        speechSynthesizer.speak(utterance)
+    }
+
     private static func pickBestAvailableVoice() -> AVSpeechSynthesisVoice? {
         if let overrideVoiceIdentifier = UserDefaults.standard.string(forKey: voiceIdentifierOverrideDefaultsKey),
            !overrideVoiceIdentifier.isEmpty,
@@ -185,5 +207,76 @@ final class FallbackTextToSpeechClient: CompanionTextToSpeechClient {
     func stopPlayback() {
         primaryClient.stopPlayback()
         fallbackClient.stopPlayback()
+    }
+}
+
+// MARK: - Streaming Speech
+
+/// Splits a reply that's still streaming into complete sentences that can be spoken
+/// right away. Only the speakable part is considered: everything before the first
+/// tag ("[POINT:...", "[CIRCLE:...") or "<visual" block, since tags come at the end.
+struct StreamingSpeechSegmenter {
+    /// How many characters of the speakable text have already been handed to TTS.
+    private(set) var consumedCharacterCount = 0
+    private(set) var spokenTextSoFar = ""
+
+    var hasSpokenAnything: Bool { consumedCharacterCount > 0 }
+
+    /// Text before the first tag or visual block.
+    static func speakablePrefix(of responseText: String) -> String {
+        var cutIndex = responseText.endIndex
+        if let tagStart = responseText.firstIndex(of: "[") {
+            cutIndex = min(cutIndex, tagStart)
+        }
+        if let visualStart = responseText.range(of: "<visual", options: .caseInsensitive)?.lowerBound {
+            cutIndex = min(cutIndex, visualStart)
+        }
+        return String(responseText[..<cutIndex])
+    }
+
+    /// Returns any newly completed sentences (nil if none yet).
+    mutating func takeCompletedSentences(from accumulatedResponseText: String) -> String? {
+        let speakableText = Self.speakablePrefix(of: accumulatedResponseText)
+        let speakableCharacters = Array(speakableText)
+        guard speakableCharacters.count > consumedCharacterCount else { return nil }
+
+        // The last sentence end: . ! ? followed by whitespace, or a line break.
+        var lastSentenceEndOffset: Int?
+        var characterOffset = speakableCharacters.count - 1
+        while characterOffset >= consumedCharacterCount {
+            let character = speakableCharacters[characterOffset]
+            if character.isNewline {
+                lastSentenceEndOffset = characterOffset + 1
+                break
+            }
+            if (character == "." || character == "!" || character == "?"),
+               characterOffset + 1 < speakableCharacters.count,
+               speakableCharacters[characterOffset + 1].isWhitespace {
+                lastSentenceEndOffset = characterOffset + 1
+                break
+            }
+            characterOffset -= 1
+        }
+
+        guard let lastSentenceEndOffset, lastSentenceEndOffset > consumedCharacterCount else { return nil }
+        let newSentencesText = String(speakableCharacters[consumedCharacterCount..<lastSentenceEndOffset])
+        // Wait for a bit more if all we have is a tiny fragment like "ok."
+        guard newSentencesText.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 || consumedCharacterCount > 0 else {
+            return nil
+        }
+        consumedCharacterCount = lastSentenceEndOffset
+        spokenTextSoFar += newSentencesText
+        return newSentencesText
+    }
+
+    /// Whatever speakable text is left once the full reply has arrived.
+    mutating func takeRemainder(from fullResponseText: String) -> String? {
+        let speakableCharacters = Array(Self.speakablePrefix(of: fullResponseText))
+        guard speakableCharacters.count > consumedCharacterCount else { return nil }
+        let remainderText = String(speakableCharacters[consumedCharacterCount...])
+        consumedCharacterCount = speakableCharacters.count
+        spokenTextSoFar += remainderText
+        let trimmedRemainderText = remainderText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedRemainderText.isEmpty ? nil : trimmedRemainderText
     }
 }

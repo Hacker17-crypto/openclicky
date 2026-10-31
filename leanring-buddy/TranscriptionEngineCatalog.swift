@@ -77,20 +77,110 @@ nonisolated struct WhisperDownloadableModel: Identifiable {
     }
 }
 
-/// A ggml model file found on disk.
+/// A Whisper model in whisper.cpp's ggml format, found anywhere on disk.
+/// Identified by its file header, not its name, so models that other apps
+/// (Superwhisper, MacWhisper, VoiceInk...) store under their own names are found too.
 nonisolated struct WhisperInstalledModel: Identifiable, Hashable {
     let fileURL: URL
     let sizeInBytes: Int64
+    /// Which app or tool the model came from ("Superwhisper", "Hugging Face cache"...).
+    let sourceName: String
+    let audioLayerCount: Int
+    let textLayerCount: Int
+    let vocabularySize: Int
+    let melBandCount: Int
+    let quantizationName: String
 
     var id: String { fileURL.path }
-    var displayName: String {
-        fileURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "ggml-", with: "")
+
+    /// English-only Whisper checkpoints have a 51864-token vocabulary; multilingual ones 51865+.
+    var isEnglishOnly: Bool { vocabularySize == 51864 }
+
+    var sizeName: String {
+        switch audioLayerCount {
+        case 4: return "Tiny"
+        case 6: return "Base"
+        case 12: return "Small"
+        case 24: return "Medium"
+        case 32:
+            if textLayerCount <= 4 { return "Large v3 Turbo" }
+            return melBandCount == 128 ? "Large v3" : "Large v2"
+        default: return "Whisper"
+        }
     }
-    /// English-only models end in ".en"; the rest detect the language.
-    var isEnglishOnly: Bool { displayName.hasSuffix(".en") || displayName.contains(".en-") }
+
+    var displayName: String {
+        var nameParts = [sizeName + (isEnglishOnly ? " (English)" : "")]
+        if quantizationName != "f16" && quantizationName != "f32" {
+            nameParts.append(quantizationName)
+        }
+        return nameParts.joined(separator: " ")
+    }
+
+    /// Rough accuracy ranking used to pick a default: bigger encoder first, then unquantized.
+    var qualityRank: Int {
+        audioLayerCount * 10 + (quantizationName == "f16" || quantizationName == "f32" ? 2 : 0) + (textLayerCount > 4 ? 1 : 0)
+    }
 }
 
-// MARK: - whisper.cpp Discovery (synchronous, file checks only)
+/// A speech model found on disk in a format whisper.cpp can't load (shown for transparency).
+nonisolated struct IncompatibleSpeechModelFinding: Identifiable, Hashable {
+    let name: String
+    let sourceName: String
+    let formatName: String
+    var id: String { "\(sourceName)/\(name)/\(formatName)" }
+}
+
+/// Reads the 48-byte whisper.cpp ggml header: magic "ggml" (little-endian 0x67676d6c)
+/// followed by n_vocab, n_audio_ctx, n_audio_state, n_audio_head, n_audio_layer,
+/// n_text_ctx, n_text_state, n_text_head, n_text_layer, n_mels, ftype (int32 each).
+nonisolated enum WhisperModelFileInspector {
+    static func inspectModel(at fileURL: URL, sourceName: String) -> WhisperInstalledModel? {
+        guard let fileHandle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+        defer { try? fileHandle.close() }
+        guard let headerData = try? fileHandle.read(upToCount: 48), headerData.count == 48 else { return nil }
+
+        let headerBytes = [UInt8](headerData)
+        guard headerBytes[0] == 0x6c, headerBytes[1] == 0x6d, headerBytes[2] == 0x67, headerBytes[3] == 0x67 else {
+            return nil
+        }
+
+        func headerInteger(at fieldIndex: Int) -> Int {
+            let byteOffset = 4 + fieldIndex * 4
+            let littleEndianValue = UInt32(headerBytes[byteOffset])
+                | UInt32(headerBytes[byteOffset + 1]) << 8
+                | UInt32(headerBytes[byteOffset + 2]) << 16
+                | UInt32(headerBytes[byteOffset + 3]) << 24
+            return Int(Int32(bitPattern: littleEndianValue))
+        }
+
+        let vocabularySize = headerInteger(at: 0)
+        let audioLayerCount = headerInteger(at: 4)
+        let textLayerCount = headerInteger(at: 8)
+        let melBandCount = headerInteger(at: 9)
+        // ftype may carry the quantization version × 1000 (e.g. 2008 = q5_0).
+        let fileType = headerInteger(at: 10) % 1000
+
+        // Sanity check so random files that happen to start with "lmgg" are ignored.
+        guard (51000...52000).contains(vocabularySize), (1...64).contains(audioLayerCount) else { return nil }
+
+        let quantizationNames: [Int: String] = [0: "f32", 1: "f16", 2: "q4_0", 3: "q4_1", 7: "q8_0", 8: "q5_0", 9: "q5_1", 10: "q2_k", 11: "q3_k", 12: "q4_k", 13: "q5_k", 14: "q6_k"]
+        let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
+
+        return WhisperInstalledModel(
+            fileURL: fileURL,
+            sizeInBytes: fileSize,
+            sourceName: sourceName,
+            audioLayerCount: audioLayerCount,
+            textLayerCount: textLayerCount,
+            vocabularySize: vocabularySize,
+            melBandCount: melBandCount,
+            quantizationName: quantizationNames[fileType] ?? "q\(fileType)"
+        )
+    }
+}
+
+// MARK: - whisper.cpp Discovery
 
 /// Only touches FileManager and UserDefaults (both thread-safe), so it's usable
 /// from any thread, including the transcription provider and background scans.
@@ -109,18 +199,39 @@ nonisolated enum WhisperCppInstallation {
             .appendingPathComponent("whisper-models", isDirectory: true)
     }
 
-    /// Places ggml models commonly live: ours, whisper.cpp checkouts, Homebrew shares, the HF cache dir some tools use.
-    static var modelSearchDirectories: [URL] {
+    /// Where speech apps and tools keep their models, labeled by source.
+    /// (Folders inside ~/Documents or other apps' containers may trigger a one-time macOS permission prompt.)
+    static var modelSearchLocations: [(directory: URL, sourceName: String)] {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let applicationSupport = homeDirectory.appendingPathComponent("Library/Application Support")
+        let containers = homeDirectory.appendingPathComponent("Library/Containers")
+        func home(_ relativePath: String) -> URL { homeDirectory.appendingPathComponent(relativePath) }
+
         return [
-            openClickyModelsDirectory,
-            homeDirectory.appendingPathComponent(".cache/whisper"),
-            homeDirectory.appendingPathComponent("whisper.cpp/models"),
-            homeDirectory.appendingPathComponent("models"),
-            URL(fileURLWithPath: "/opt/homebrew/share/whisper-cpp"),
-            URL(fileURLWithPath: "/opt/homebrew/share/whisper-cpp/models"),
-            URL(fileURLWithPath: "/usr/local/share/whisper-cpp"),
-            URL(fileURLWithPath: "/usr/local/share/whisper-cpp/models")
+            (openClickyModelsDirectory, "OpenClicky"),
+            // Superwhisper (current default is ~/superwhisper; older installs used Documents)
+            (home("superwhisper"), "Superwhisper"),
+            (home("Documents/superwhisper"), "Superwhisper"),
+            (applicationSupport.appendingPathComponent("superwhisper"), "Superwhisper"),
+            (applicationSupport.appendingPathComponent("com.superduper.superwhisper"), "Superwhisper"),
+            (containers.appendingPathComponent("com.superduper.superwhisper"), "Superwhisper"),
+            (URL(fileURLWithPath: "/Applications/superwhisper.app/Contents/Resources"), "Superwhisper"),
+            // Other dictation / transcription apps
+            (applicationSupport.appendingPathComponent("MacWhisper"), "MacWhisper"),
+            (containers.appendingPathComponent("com.goodsnooze.MacWhisper"), "MacWhisper"),
+            (applicationSupport.appendingPathComponent("com.prakashjoshipax.VoiceInk"), "VoiceInk"),
+            (home("Library/Caches/Buzz"), "Buzz"),
+            (applicationSupport.appendingPathComponent("Buzz"), "Buzz"),
+            (applicationSupport.appendingPathComponent("Meetily"), "Meetily"),
+            (home(".voicemode/models"), "VoiceMode"),
+            // whisper.cpp itself and common download spots
+            (home(".cache/whisper"), "whisper.cpp"),
+            (home("whisper.cpp/models"), "whisper.cpp"),
+            (home("models"), "Downloads"),
+            (home("Downloads"), "Downloads"),
+            (URL(fileURLWithPath: "/opt/homebrew/share/whisper-cpp"), "Homebrew"),
+            (URL(fileURLWithPath: "/usr/local/share/whisper-cpp"), "Homebrew"),
+            (home(".cache/huggingface/hub"), "Hugging Face cache")
         ]
     }
 
@@ -160,38 +271,153 @@ nonisolated enum WhisperCppInstallation {
         return nil
     }
 
-    static func findInstalledModels() -> [WhisperInstalledModel] {
-        var installedModels: [WhisperInstalledModel] = []
-        var seenModelPaths = Set<String>()
+    /// Scans every known location (plus Spotlight) for Whisper models. Run off the main thread.
+    static func findInstalledModels() -> (whisperModels: [WhisperInstalledModel], incompatibleModels: [IncompatibleSpeechModelFinding]) {
+        var whisperModels: [WhisperInstalledModel] = []
+        var incompatibleModels: [IncompatibleSpeechModelFinding] = []
+        var seenResolvedPaths = Set<String>()
 
-        for searchDirectory in modelSearchDirectories {
-            guard let directoryContents = try? FileManager.default.contentsOfDirectory(
-                at: searchDirectory,
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
-
-            for fileURL in directoryContents
-            where fileURL.lastPathComponent.hasPrefix("ggml-") && fileURL.pathExtension == "bin" {
-                let resolvedPath = fileURL.resolvingSymlinksInPath().path
-                guard seenModelPaths.insert(resolvedPath).inserted else { continue }
-                let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
-                // Skip tiny files (failed downloads, test fixtures).
-                guard fileSize > 10_000_000 else { continue }
-                installedModels.append(WhisperInstalledModel(fileURL: fileURL, sizeInBytes: fileSize))
+        func considerFile(_ fileURL: URL, sourceName: String) {
+            let resolvedPath = fileURL.resolvingSymlinksInPath().path
+            guard seenResolvedPaths.insert(resolvedPath).inserted else { return }
+            if let inspectedModel = WhisperModelFileInspector.inspectModel(at: fileURL, sourceName: sourceName) {
+                whisperModels.append(inspectedModel)
             }
         }
 
-        return installedModels.sorted { $0.sizeInBytes > $1.sizeInBytes }
+        for searchLocation in modelSearchLocations {
+            scanDirectory(
+                searchLocation.directory,
+                sourceName: searchLocation.sourceName,
+                considerFile: considerFile,
+                recordIncompatibleModel: { incompatibleModels.append($0) }
+            )
+        }
+
+        // Spotlight catches models in places we didn't think of.
+        for spotlightResultPath in findCandidateModelPathsWithSpotlight() {
+            considerFile(URL(fileURLWithPath: spotlightResultPath), sourceName: guessSourceName(forPath: spotlightResultPath))
+        }
+
+        let uniqueIncompatibleModels = Array(Set(incompatibleModels)).sorted { $0.id < $1.id }
+        return (whisperModels.sorted { $0.qualityRank > $1.qualityRank }, uniqueIncompatibleModels)
     }
 
-    /// The model the user picked, or the largest installed one.
-    static func selectedModelURL() -> URL? {
-        if let selectedModelPath = UserDefaults.standard.string(forKey: selectedModelPathDefaultsKey),
-           FileManager.default.fileExists(atPath: selectedModelPath) {
-            return URL(fileURLWithPath: selectedModelPath)
+    private static func scanDirectory(
+        _ rootDirectory: URL,
+        sourceName: String,
+        considerFile: (URL, String) -> Void,
+        recordIncompatibleModel: (IncompatibleSpeechModelFinding) -> Void
+    ) {
+        guard FileManager.default.fileExists(atPath: rootDirectory.path),
+              let directoryEnumerator = FileManager.default.enumerator(
+                at: rootDirectory,
+                includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .isSymbolicLinkKey],
+                options: [.skipsPackageDescendants]
+              ) else {
+            return
         }
-        return findInstalledModels().first?.fileURL
+
+        let isDownloadsFolder = rootDirectory.lastPathComponent == "Downloads"
+        var visitedEntryCount = 0
+
+        for case let entryURL as URL in directoryEnumerator {
+            visitedEntryCount += 1
+            // Keep scans quick even in huge folders.
+            if visitedEntryCount > 20_000 { break }
+            if directoryEnumerator.level > (isDownloadsFolder ? 2 : 7) {
+                directoryEnumerator.skipDescendants()
+                continue
+            }
+
+            let entryName = entryURL.lastPathComponent
+            let resourceValues = try? entryURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+
+            if resourceValues?.isDirectory == true {
+                // Core ML models (WhisperKit / Superwhisper's Apple-silicon builds) are folders of .mlmodelc bundles.
+                if entryName == "AudioEncoder.mlmodelc" || entryName.hasSuffix("-encoder.mlmodelc") {
+                    let modelFolderName = entryURL.deletingLastPathComponent().lastPathComponent
+                    // whisper.cpp's own "-encoder.mlmodelc" sits next to a ggml file and is fine to ignore.
+                    if entryName == "AudioEncoder.mlmodelc" {
+                        recordIncompatibleModel(IncompatibleSpeechModelFinding(name: modelFolderName, sourceName: sourceName, formatName: "Core ML (WhisperKit)"))
+                    }
+                    directoryEnumerator.skipDescendants()
+                } else if entryName.lowercased().contains("parakeet") {
+                    recordIncompatibleModel(IncompatibleSpeechModelFinding(name: entryName, sourceName: sourceName, formatName: "Parakeet"))
+                }
+                continue
+            }
+
+            let fileSize = resourceValues?.fileSize ?? 0
+            // Whisper models are at least ~30 MB (tiny is 75 MB unquantized, ~31 MB at q5).
+            guard fileSize > 25_000_000 else { continue }
+
+            let lowercasedName = entryName.lowercased()
+            if lowercasedName.hasSuffix(".onnx") || lowercasedName.hasSuffix(".nemo") {
+                if lowercasedName.contains("whisper") || lowercasedName.contains("parakeet") || lowercasedName.contains("encoder") {
+                    recordIncompatibleModel(IncompatibleSpeechModelFinding(name: entryName, sourceName: sourceName, formatName: lowercasedName.hasSuffix(".nemo") ? "NeMo" : "ONNX"))
+                }
+                continue
+            }
+            if lowercasedName.hasSuffix(".gguf") || lowercasedName.hasSuffix(".safetensors") || lowercasedName.hasSuffix(".npz") {
+                if lowercasedName.contains("whisper") {
+                    recordIncompatibleModel(IncompatibleSpeechModelFinding(name: entryName, sourceName: sourceName, formatName: "MLX / safetensors"))
+                }
+                continue
+            }
+
+            // Anything else big enough gets a cheap 48-byte header check.
+            considerFile(entryURL, sourceName)
+        }
+    }
+
+    /// Asks Spotlight for large files that look like ggml models. Returns paths only; headers are checked after.
+    private static func findCandidateModelPathsWithSpotlight() -> [String] {
+        let spotlightProcess = Process()
+        spotlightProcess.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        spotlightProcess.arguments = ["kMDItemFSSize > 25000000 && (kMDItemFSName == '*ggml*'c || kMDItemFSName == '*whisper*.bin'c || kMDItemFSName == '*.bin'c)"]
+        let standardOutputPipe = Pipe()
+        spotlightProcess.standardOutput = standardOutputPipe
+        spotlightProcess.standardError = FileHandle.nullDevice
+
+        let processFinishedSemaphore = DispatchSemaphore(value: 0)
+        spotlightProcess.terminationHandler = { _ in processFinishedSemaphore.signal() }
+        do {
+            try spotlightProcess.run()
+        } catch {
+            return []
+        }
+
+        let standardOutputData = standardOutputPipe.fileHandleForReading.readDataToEndOfFile()
+        if processFinishedSemaphore.wait(timeout: .now() + 5) == .timedOut {
+            spotlightProcess.terminate()
+        }
+
+        let outputText = String(data: standardOutputData, encoding: .utf8) ?? ""
+        return outputText
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .prefix(200)
+            .map { $0 }
+    }
+
+    private static func guessSourceName(forPath filePath: String) -> String {
+        let lowercasedPath = filePath.lowercased()
+        let knownSources: [(pathFragment: String, sourceName: String)] = [
+            ("superwhisper", "Superwhisper"), ("macwhisper", "MacWhisper"), ("voiceink", "VoiceInk"),
+            ("buzz", "Buzz"), ("huggingface", "Hugging Face cache"), ("whisper.cpp", "whisper.cpp"),
+            ("homebrew", "Homebrew"), ("/downloads/", "Downloads"), ("openclicky", "OpenClicky")
+        ]
+        return knownSources.first { lowercasedPath.contains($0.pathFragment) }?.sourceName ?? "Found by Spotlight"
+    }
+
+    /// The model the user picked (if it still exists).
+    static func selectedModelURL() -> URL? {
+        guard let selectedModelPath = UserDefaults.standard.string(forKey: selectedModelPathDefaultsKey),
+              FileManager.default.fileExists(atPath: selectedModelPath) else {
+            return nil
+        }
+        return URL(fileURLWithPath: selectedModelPath)
     }
 }
 
@@ -206,6 +432,8 @@ final class TranscriptionEngineCatalog: ObservableObject {
 
     @Published private(set) var whisperExecutablePath: String?
     @Published private(set) var installedWhisperModels: [WhisperInstalledModel] = []
+    /// Speech models found in formats whisper.cpp can't load (e.g. Core ML from Superwhisper).
+    @Published private(set) var incompatibleSpeechModels: [IncompatibleSpeechModelFinding] = []
     @Published private(set) var isScanning = false
     @Published private(set) var downloadingModelFileName: String?
     @Published private(set) var downloadProgressFraction: Double = 0
@@ -247,6 +475,19 @@ final class TranscriptionEngineCatalog: ObservableObject {
         return false
     }
 
+    /// True when whisper.cpp is linked into the app (WhisperFramework package), so models
+    /// run without Homebrew's whisper-cli.
+    var isWhisperBundledInApp: Bool {
+        #if canImport(whisper)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Whisper can run either in-app or through whisper-cli.
+    var canRunWhisper: Bool { isWhisperBundledInApp || whisperExecutablePath != nil }
+
     var hasAssemblyAIKey: Bool { AppBundleConfiguration.stringValue(forKey: "AssemblyAIAPIKey") != nil }
     var hasOpenAIKey: Bool { AppBundleConfiguration.stringValue(forKey: "OpenAIAPIKey") != nil }
 
@@ -254,7 +495,7 @@ final class TranscriptionEngineCatalog: ObservableObject {
         switch engine {
         case .appleSpeech: return true
         case .appleSpeechAnalyzer: return isSpeechAnalyzerAvailable
-        case .whisperCpp: return whisperExecutablePath != nil && !installedWhisperModels.isEmpty
+        case .whisperCpp: return canRunWhisper && !installedWhisperModels.isEmpty
         case .assemblyAI: return hasAssemblyAIKey
         case .openAI: return hasOpenAIKey
         }
@@ -274,8 +515,12 @@ final class TranscriptionEngineCatalog: ObservableObject {
         case .appleSpeechAnalyzer:
             return isSpeechAnalyzerAvailable ? "Ready" : "Needs macOS 26 or later"
         case .whisperCpp:
-            if whisperExecutablePath == nil { return "whisper.cpp not installed" }
-            if installedWhisperModels.isEmpty { return "Installed, needs a model" }
+            if !canRunWhisper {
+                return installedWhisperModels.isEmpty
+                    ? "whisper.cpp not installed"
+                    : "Found \(installedWhisperModels.count) model(s); needs whisper.cpp to run them"
+            }
+            if installedWhisperModels.isEmpty { return "Ready to run, needs a model" }
             return installedWhisperModels.count == 1 ? "Ready, 1 model found" : "Ready, \(installedWhisperModels.count) models found"
         case .assemblyAI:
             return hasAssemblyAIKey ? "Key found" : "Add AssemblyAIAPIKey to Info.plist"
@@ -287,13 +532,19 @@ final class TranscriptionEngineCatalog: ObservableObject {
     // MARK: Scanning
 
     func refresh() {
+        guard !isScanning else { return }
         isScanning = true
         Task {
             let discoveredExecutablePath = await Task.detached(priority: .utility) {
                 WhisperCppInstallation.findExecutablePathIncludingLoginShell()
             }.value
+            let (discoveredWhisperModels, discoveredIncompatibleModels) = await Task.detached(priority: .utility) {
+                WhisperCppInstallation.findInstalledModels()
+            }.value
             whisperExecutablePath = discoveredExecutablePath
-            installedWhisperModels = WhisperCppInstallation.findInstalledModels()
+            installedWhisperModels = discoveredWhisperModels
+            incompatibleSpeechModels = discoveredIncompatibleModels
+            print("🎙️ Found \(discoveredWhisperModels.count) Whisper model(s): \(discoveredWhisperModels.map { "\($0.displayName) [\($0.sourceName)]" }.joined(separator: ", "))")
             if selectedWhisperModelPath == nil || !installedWhisperModels.contains(where: { $0.fileURL.path == selectedWhisperModelPath }) {
                 selectedWhisperModelPath = installedWhisperModels.first?.fileURL.path
             }

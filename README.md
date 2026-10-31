@@ -8,7 +8,7 @@ OpenClicky is a fork of [Clicky](https://github.com/farzaa/clicky) by Farza (MIT
 
 ## What it can do
 
-**Talk.** Hold **Control + Option**, ask anything out loud, and let go. OpenClicky screenshots your screen, asks Claude through your local Claude Code, and answers out loud with captions next to your cursor. It remembers the conversation (the last 40 messages) and what it learns about you.
+**Talk.** Hold **Control + Option**, ask anything out loud, and let go. OpenClicky screenshots your screen, asks Claude through your local Claude Code, and answers out loud with captions. It boots Claude Code while you're still talking and speaks each sentence as soon as Claude writes it, so answers start about a second after you let go. It also tells Claude which app and window you're in and any text you have selected, so "what does this mean?" about a highlighted sentence just works. Press **Escape** to stop it mid-sentence. It remembers the conversation (the last 40 messages) and what it learns about you.
 
 **Draw on your screen to ask.** While holding Control + Option, drag with the mouse or trackpad to circle, underline or arrow the thing you mean ("what's *this* number?"). Your marks show up in coral on screen and are burned into the screenshot Claude sees. The drag doesn't reach the app underneath, so nothing gets selected or moved.
 
@@ -35,7 +35,7 @@ Say "agent, ..." to skip straight to an agent. Results land in `~/OpenClicky/<da
 
 **Choose how it hears you.** On first launch OpenClicky checks which speech-to-text engines your Mac has and asks you to pick one (change it anytime in Settings → Transcription):
 - **Apple SpeechAnalyzer**: Apple's newest on-device model (macOS 26+). Downloads its language model once.
-- **Whisper (whisper.cpp)**: if you've run `brew install whisper-cpp`. OpenClicky finds ggml models already on disk (`~/.cache/whisper`, `~/whisper.cpp/models`, Homebrew's share folder) and can download Base, Small or Large v3 Turbo for you.
+- **Whisper (whisper.cpp)**: uses **every Whisper model already on your Mac**, including ones downloaded by **Superwhisper**, MacWhisper, VoiceInk, Buzz, Hugging Face tools, Homebrew or your Downloads folder, plus anything Spotlight finds. Models are recognized by their file header, not their name, so renamed models are labeled correctly ("Large v3 Turbo q5_0, from Superwhisper"). You can also download Base, Small or Large v3 Turbo in one click. Runs through `whisper-cli` (`brew install whisper-cpp`), or inside the app if the bundled whisper.cpp framework is enabled (see `Packages/`). Models in formats whisper.cpp can't run (Core ML, Parakeet, ONNX) are listed so you know why they're not offered.
 - **Apple Speech**: built in, on-device, zero setup.
 - AssemblyAI / OpenAI (cloud): only listed if you added your own key.
 

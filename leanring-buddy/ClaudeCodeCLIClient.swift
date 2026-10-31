@@ -331,25 +331,14 @@ nonisolated final class ClaudeCodeCLIClient {
             userPrompt: userPrompt
         )
 
-        let claudeProcess = Process()
-        claudeProcess.executableURL = URL(fileURLWithPath: installation.executablePath)
-        claudeProcess.arguments = makeCommandLineArguments(systemPrompt: systemPrompt)
-        claudeProcess.currentDirectoryURL = Self.makeWorkingDirectory()
-
-        var processEnvironment = ProcessInfo.processInfo.environment
-        processEnvironment["PATH"] = installation.processSearchPath
-        // If OpenClicky was launched from a terminal that is itself inside a
-        // Claude Code session, don't let the child think it's nested.
-        processEnvironment.removeValue(forKey: "CLAUDECODE")
-        processEnvironment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
-        claudeProcess.environment = processEnvironment
-
-        let standardInputPipe = Pipe()
-        let standardOutputPipe = Pipe()
-        let standardErrorPipe = Pipe()
-        claudeProcess.standardInput = standardInputPipe
-        claudeProcess.standardOutput = standardOutputPipe
-        claudeProcess.standardError = standardErrorPipe
+        // Use the process started when the hotkey went down, if it matches this request.
+        let preparedProcess = takePrewarmedProcess(matchingSystemPrompt: systemPrompt)
+            ?? makePreparedProcess(installation: installation, systemPrompt: systemPrompt)
+        let claudeProcess = preparedProcess.process
+        let standardInputPipe = preparedProcess.standardInputPipe
+        let standardOutputPipe = preparedProcess.standardOutputPipe
+        let standardErrorPipe = preparedProcess.standardErrorPipe
+        let isProcessAlreadyRunning = preparedProcess.isRunning
 
         let processHandle = ClaudeCodeProcessHandle(process: claudeProcess)
 
@@ -362,7 +351,11 @@ nonisolated final class ClaudeCodeCLIClient {
         signal(SIGPIPE, SIG_IGN)
 
         return try await withTaskCancellationHandler {
-            try claudeProcess.run()
+            if isProcessAlreadyRunning {
+                print("🤖 Claude Code: using pre-warmed process")
+            } else {
+                try claudeProcess.run()
+            }
 
             // Drain stderr concurrently so a chatty CLI can't fill the pipe buffer and stall.
             let standardErrorReadHandle = standardErrorPipe.fileHandleForReading
@@ -469,6 +462,124 @@ nonisolated final class ClaudeCodeCLIClient {
         } onCancel: {
             processHandle.terminateIfRunning()
         }
+    }
+
+    // MARK: - Pre-warming
+
+    /// A configured `claude` process (possibly already running and waiting for its message).
+    private struct PreparedClaudeProcess {
+        let process: Process
+        let standardInputPipe: Pipe
+        let standardOutputPipe: Pipe
+        let standardErrorPipe: Pipe
+        let systemPrompt: String
+        let model: String
+        let createdAt: Date
+        var isRunning: Bool { process.isRunning }
+    }
+
+    private let prewarmLock = NSLock()
+    private var prewarmedProcess: PreparedClaudeProcess?
+
+    /// Starts `claude` in the background (call when the user presses the hotkey) so it has
+    /// finished booting by the time the question is ready. It waits on stdin until used.
+    func prewarmProcess(systemPrompt: String) {
+        Task.detached(priority: .userInitiated) { [self] in
+            guard let installation = try? Self.resolveInstallation() else { return }
+            self.discardPrewarmedProcess()
+
+            var newPreparedProcess = self.makePreparedProcess(installation: installation, systemPrompt: systemPrompt)
+            signal(SIGPIPE, SIG_IGN)
+            do {
+                try newPreparedProcess.process.run()
+            } catch {
+                return
+            }
+            newPreparedProcess = PreparedClaudeProcess(
+                process: newPreparedProcess.process,
+                standardInputPipe: newPreparedProcess.standardInputPipe,
+                standardOutputPipe: newPreparedProcess.standardOutputPipe,
+                standardErrorPipe: newPreparedProcess.standardErrorPipe,
+                systemPrompt: systemPrompt,
+                model: self.model,
+                createdAt: Date()
+            )
+            self.prewarmLock.withLock { self.prewarmedProcess = newPreparedProcess }
+
+            // Don't leave an unused process around if the user never asks anything.
+            let prewarmCreatedAt = newPreparedProcess.createdAt
+            try? await Task.sleep(nanoseconds: 120_000_000_000)
+            let isStillUnused = self.prewarmLock.withLock { self.prewarmedProcess?.createdAt == prewarmCreatedAt }
+            if isStillUnused {
+                self.discardPrewarmedProcess()
+            }
+        }
+    }
+
+    /// Kills an unused pre-warmed process (e.g. the user released without speaking).
+    func discardPrewarmedProcess() {
+        let unusedPreparedProcess: PreparedClaudeProcess? = prewarmLock.withLock {
+            let currentPreparedProcess = prewarmedProcess
+            prewarmedProcess = nil
+            return currentPreparedProcess
+        }
+        if let unusedPreparedProcess, unusedPreparedProcess.isRunning {
+            unusedPreparedProcess.process.terminate()
+        }
+    }
+
+    /// Hands over the pre-warmed process if it's alive, fresh, and was started with the same prompt and model.
+    private func takePrewarmedProcess(matchingSystemPrompt systemPrompt: String) -> PreparedClaudeProcess? {
+        let candidatePreparedProcess: PreparedClaudeProcess? = prewarmLock.withLock {
+            let currentPreparedProcess = prewarmedProcess
+            prewarmedProcess = nil
+            return currentPreparedProcess
+        }
+        guard let candidatePreparedProcess else { return nil }
+
+        let isUsable = candidatePreparedProcess.isRunning
+            && candidatePreparedProcess.systemPrompt == systemPrompt
+            && candidatePreparedProcess.model == model
+            && Date().timeIntervalSince(candidatePreparedProcess.createdAt) < 120
+        if isUsable {
+            return candidatePreparedProcess
+        }
+        if candidatePreparedProcess.isRunning {
+            candidatePreparedProcess.process.terminate()
+        }
+        return nil
+    }
+
+    private func makePreparedProcess(installation: ClaudeCodeCLIInstallation, systemPrompt: String) -> PreparedClaudeProcess {
+        let claudeProcess = Process()
+        claudeProcess.executableURL = URL(fileURLWithPath: installation.executablePath)
+        claudeProcess.arguments = makeCommandLineArguments(systemPrompt: systemPrompt)
+        claudeProcess.currentDirectoryURL = Self.makeWorkingDirectory()
+
+        var processEnvironment = ProcessInfo.processInfo.environment
+        processEnvironment["PATH"] = installation.processSearchPath
+        // If OpenClicky was launched from a terminal that is itself inside a
+        // Claude Code session, don't let the child think it's nested.
+        processEnvironment.removeValue(forKey: "CLAUDECODE")
+        processEnvironment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
+        claudeProcess.environment = processEnvironment
+
+        let standardInputPipe = Pipe()
+        let standardOutputPipe = Pipe()
+        let standardErrorPipe = Pipe()
+        claudeProcess.standardInput = standardInputPipe
+        claudeProcess.standardOutput = standardOutputPipe
+        claudeProcess.standardError = standardErrorPipe
+
+        return PreparedClaudeProcess(
+            process: claudeProcess,
+            standardInputPipe: standardInputPipe,
+            standardOutputPipe: standardOutputPipe,
+            standardErrorPipe: standardErrorPipe,
+            systemPrompt: systemPrompt,
+            model: model,
+            createdAt: Date()
+        )
     }
 
     /// Non-streaming convenience wrapper with the same signature as the original API client.

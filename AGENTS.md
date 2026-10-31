@@ -55,6 +55,10 @@ Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (Visu
 - **Status pill**: `StatusPillPanel.swift`, an `.statusBar`-level click-through panel at top center that sizes around the notch (`auxiliaryTopLeftArea/RightArea`). Captions come from `CompanionManager.currentCaptionText`; the speaking state is polled from the TTS client.
 - **Transcription engines**: `TranscriptionEngineCatalog` detects Apple Speech, SpeechAnalyzer (macOS 26), whisper.cpp (`whisper-cli` + `ggml-*.bin` models; downloads from Hugging Face into Application Support/OpenClicky/whisper-models) and keyed cloud engines. The choice lives in UserDefaults `selectedTranscriptionEngine`, which `BuddyTranscriptionProviderFactory` reads first; `BuddyDictationManager.reloadTranscriptionProvider()` hot-swaps it. The first-run chooser window opens from `CompanionManager.askForTranscriptionEngineIfNeeded()`. The whisper.cpp and SpeechAnalyzer sessions are `nonisolated` (audio arrives off the main thread) and self-contained (their own AVAudioConverter and WAV writer).
 - **Drawing animation**: `OpenClickyDrawingTiming` sets pen speed and a 0.38s stagger between drawings. `AnimatedPenStroke` (Animatable) trims the felt-tip stroke and moves the glowing nib along the path each frame.
+- **Latency**: on talk-key press, `ClaudeCodeCLIClient.prewarmProcess` boots `claude` with the current system prompt and leaves it waiting on stdin; `analyzeImageStreaming` takes it if the prompt and model match (measured: first token ~0.8s vs ~1.5s cold). Unused prewarms are killed after 120s. `StreamingSpeechSegmenter` enqueues complete sentences (before the first `[` tag or `<visual`) to the queued macOS TTS while Claude streams; the remainder is spoken at the end. Keep the system prompt stable between press and release (no live agent activity in it) or the prewarm is wasted.
+- **Context**: `FocusedAppContextReader` (Accessibility API) adds the frontmost app, window title and selected text to the question and to dictation drafting.
+- **Escape**: `escapeKeyPublisher` (pass-through) stops speech, the response, drawings and visual cards, only when OpenClicky is busy.
+- **Model discovery**: `WhisperCppInstallation.findInstalledModels()` walks known app folders (Superwhisper, MacWhisper, VoiceInk, Buzz, Meetily, HF cache, Homebrew, Downloads) plus `mdfind`, and accepts any file whose 48-byte header is a whisper ggml header (`WhisperModelFileInspector` derives size, language and quantization). `WhisperBundledTranscriptionProvider` (in-process whisper.cpp) compiles only when the `whisper` module is linked (`#if canImport(whisper)`).
 - **Memory/settings**: OpenClickySettings (UserDefaults), OpenClickyMemoryStore (`PROFILE.md` + `conversation.json` in Application Support, 20 exchanges), Settings window from the panel footer.
 
 ### Key Architecture Decisions
@@ -90,7 +94,6 @@ Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (Visu
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeCodeCLIClient.swift` | ~520 | Claude via the local Claude Code CLI. Locates `claude` + PATH, builds the stream-json message (history, screenshots, transcript), streams text deltas, maps CLI errors (not installed / not logged in / failed), terminates on cancellation. |
-| `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
 | `OpenClickyAgents.swift` | ~560 | Agent process (stdio permission protocol), OpenClickyAgent state machine (countdown → working → needs approval → finished/failed), OpenClickyAgentManager. |
 | `AgentCardsPanel.swift` | ~330 | Top-right floating NSPanel with an agent card per agent (approve/stop/retry/reply/open folder). |
 | `ScreenAnnotations.swift` | ~560 | Tag parser for drawing/agent/memory tags, screenshot→screen coordinate conversion, hand-drawn circle/arrow/highlight/underline, callout labels, sticky notes. |
@@ -103,9 +106,10 @@ Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (Visu
 | `TranscriptionEngineChooser.swift` | ~300 | "How should OpenClicky hear you?" chooser (first-run window and Settings section) with whisper setup and downloads. |
 | `WhisperCppTranscriptionProvider.swift` | ~330 | Local Whisper via whisper-cli: buffer 16 kHz PCM → WAV → `-nt -np -otxt`, vocabulary prompt, marker cleanup. |
 | `AppleSpeechAnalyzerTranscriptionProvider.swift` | ~250 | macOS 26 SpeechAnalyzer/SpeechTranscriber streaming session with asset download and volatile/final results. |
+| `WhisperBundledTranscriptionProvider.swift` | ~280 | In-process whisper.cpp (Metal) with a cached model context; active only when the WhisperFramework package is linked. |
+| `FocusedAppContextReader.swift` | ~100 | Frontmost app, window title and selected text via the Accessibility API. |
 | `ElevenLabsTTSClient.swift` | ~87 | Optional ElevenLabs TTS client using the user's own key directly. Plays audio via `AVAudioPlayer`. |
 | `LocalSpeechTTSClient.swift` | ~165 | `CompanionTextToSpeechClient` protocol, default macOS `AVSpeechSynthesizer` client, ElevenLabs→macOS fallback wrapper, and factory. |
-| `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~130 | Analytics event surface. All events are local no-ops (no telemetry). |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |

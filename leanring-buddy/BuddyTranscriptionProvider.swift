@@ -118,6 +118,11 @@ enum BuddyTranscriptionProviderFactory {
             print("⚠️ Transcription: SpeechAnalyzer needs macOS 26, falling back")
             return nil
         case .whisperCpp:
+            #if canImport(whisper)
+            // whisper.cpp bundled as a library: no command-line tool needed.
+            let bundledWhisperProvider = WhisperBundledTranscriptionProvider()
+            if bundledWhisperProvider.isConfigured { return bundledWhisperProvider }
+            #endif
             let whisperProvider = WhisperCppTranscriptionProvider()
             if whisperProvider.isConfigured { return whisperProvider }
             print("⚠️ Transcription: \(whisperProvider.unavailableExplanation ?? "Whisper not ready"), falling back")
