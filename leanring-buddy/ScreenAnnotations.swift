@@ -21,7 +21,9 @@
 //
 
 import AppKit
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Model
 
@@ -313,6 +315,16 @@ struct ScreenAnnotationLayerView: View {
 
     var body: some View {
         ZStack {
+            // What the user drew while holding the talk shortcut.
+            ForEach(Array(userInkStrokesOnThisScreen.enumerated()), id: \.offset) { _, inkStrokeLocalPoints in
+                UserInkStrokeShape(localPoints: inkStrokeLocalPoints)
+                    .stroke(
+                        OpenClickyInkStyle.userInkColor,
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
+                    )
+                    .shadow(color: OpenClickyInkStyle.userInkColor.opacity(0.55), radius: 5)
+            }
+
             ForEach(Array(annotationsOnThisScreen.enumerated()), id: \.element.id) { annotationIndex, screenAnnotation in
                 switch screenAnnotation.shape {
                 case .calloutLabel(let globalAnchor):
@@ -346,6 +358,15 @@ struct ScreenAnnotationLayerView: View {
         )
     }
 
+    private var userInkStrokesOnThisScreen: [[CGPoint]] {
+        companionManager.userInkStrokes
+            .filter { inkStroke in
+                guard let firstInkPoint = inkStroke.first else { return false }
+                return screenFrame.contains(firstInkPoint)
+            }
+            .map { inkStroke in inkStroke.map(convertGlobalPointToLocal) }
+    }
+
     private var annotationsOnThisScreen: [ScreenAnnotation] {
         companionManager.activeScreenAnnotations.filter { screenAnnotation in
             screenAnnotation.displayFrame == screenFrame
@@ -362,7 +383,7 @@ private struct HandDrawnAnnotationView: View {
 
     @State private var strokeDrawProgress: CGFloat = 0
 
-    private let markerColor = DS.Colors.overlayCursorBlue
+    private let markerColor = OpenClickyInkStyle.claudeMarkerColor
 
     var body: some View {
         ZStack {
@@ -376,18 +397,19 @@ private struct HandDrawnAnnotationView: View {
 
             annotationStrokePath
                 .trim(from: 0, to: strokeDrawProgress)
-                .stroke(markerColor, style: StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round))
-                .shadow(color: markerColor.opacity(0.6), radius: 6)
+                .stroke(markerColor, style: StrokeStyle(lineWidth: 3.2, lineCap: .round, lineJoin: .round))
+                .shadow(color: Color.black.opacity(0.25), radius: 1.5, x: 0, y: 1)
 
             if let label = screenAnnotation.label, !label.isEmpty {
                 Text(label)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(Color(red: 0.16, green: 0.13, blue: 0.04))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
                     .background(
                         RoundedRectangle(cornerRadius: 5, style: .continuous)
                             .fill(markerColor)
+                            .shadow(color: Color.black.opacity(0.25), radius: 3, x: 0, y: 1)
                     )
                     .fixedSize()
                     .position(labelPosition)
@@ -615,9 +637,11 @@ private struct StickyNoteAnnotationView: View {
             .padding(16)
             .background(
                 ZStack(alignment: .top) {
-                    Rectangle().fill(Color(red: 1.0, green: 0.92, blue: 0.55))
+                    StickyNoteBodyShape(foldSize: 26).fill(Color(red: 1.0, green: 0.92, blue: 0.55))
                     // Darker strip where the note's adhesive is
                     Rectangle().fill(Color(red: 0.98, green: 0.86, blue: 0.40)).frame(height: 14)
+                    // Curled bottom-right corner
+                    StickyNoteFoldShape(foldSize: 26).fill(Color(red: 0.91, green: 0.79, blue: 0.33))
                 }
             )
             .shadow(color: Color.black.opacity(0.35), radius: 10, x: 2, y: 6)
@@ -637,6 +661,157 @@ private struct StickyNoteAnnotationView: View {
         CGPoint(
             x: min(max(centerPoint.x, 120), screenSize.width - 120),
             y: min(max(centerPoint.y, 100), screenSize.height - 100)
+        )
+    }
+}
+
+// MARK: - Ink Style & Shapes
+
+enum OpenClickyInkStyle {
+    /// The user's own marks (drawn while holding the talk shortcut): coral, like a felt pen.
+    static let userInkColor = Color(red: 1.0, green: 0.42, blue: 0.24)
+    static let userInkNSColor = NSColor(red: 1.0, green: 0.42, blue: 0.24, alpha: 1)
+    /// Claude's marks: warm gold highlighter, so the two are easy to tell apart.
+    static let claudeMarkerColor = Color(red: 0.91, green: 0.72, blue: 0.23)
+}
+
+/// A freehand stroke smoothed with quadratic curves through segment midpoints.
+private struct UserInkStrokeShape: Shape {
+    let localPoints: [CGPoint]
+
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            guard let firstPoint = localPoints.first else { return }
+            path.move(to: firstPoint)
+            if localPoints.count < 3 {
+                for point in localPoints.dropFirst() { path.addLine(to: point) }
+                return
+            }
+            for pointIndex in 1..<localPoints.count {
+                let previousPoint = localPoints[pointIndex - 1]
+                let currentPoint = localPoints[pointIndex]
+                let midpoint = CGPoint(x: (previousPoint.x + currentPoint.x) / 2, y: (previousPoint.y + currentPoint.y) / 2)
+                path.addQuadCurve(to: midpoint, control: previousPoint)
+            }
+            if let lastPoint = localPoints.last { path.addLine(to: lastPoint) }
+        }
+    }
+}
+
+/// Sticky note paper with its bottom-right corner cut off (the fold covers it).
+private struct StickyNoteBodyShape: Shape {
+    let foldSize: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - foldSize))
+            path.addLine(to: CGPoint(x: rect.maxX - foldSize, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+            path.closeSubpath()
+        }
+    }
+}
+
+/// The curled-up corner triangle.
+private struct StickyNoteFoldShape: Shape {
+    let foldSize: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            path.move(to: CGPoint(x: rect.maxX, y: rect.maxY - foldSize))
+            path.addLine(to: CGPoint(x: rect.maxX - foldSize, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.maxX - foldSize, y: rect.maxY - foldSize))
+            path.closeSubpath()
+        }
+    }
+}
+
+// MARK: - Burning Ink Into Screenshots
+
+extension CompanionScreenCapture {
+    /// Inverse of globalAppKitPoint(fromScreenshotPixelPoint:): global AppKit point → screenshot pixel (top-left origin).
+    func screenshotPixelPoint(fromGlobalAppKitPoint globalPoint: CGPoint) -> CGPoint {
+        let horizontalScale = CGFloat(screenshotWidthInPixels) / CGFloat(displayWidthInPoints)
+        let verticalScale = CGFloat(screenshotHeightInPixels) / CGFloat(displayHeightInPoints)
+        return CGPoint(
+            x: (globalPoint.x - displayFrame.minX) * horizontalScale,
+            y: (displayFrame.maxY - globalPoint.y) * verticalScale
+        )
+    }
+
+    /// Returns a copy of this capture with the user's ink strokes drawn onto the image,
+    /// so Claude sees exactly what the user circled or pointed at. Our own overlay
+    /// windows are excluded from screen capture, which is why this is done by hand.
+    func drawingInkStrokes(_ inkStrokesInGlobalAppKitPoints: [[CGPoint]]) -> CompanionScreenCapture {
+        let strokesOnThisDisplay = inkStrokesInGlobalAppKitPoints.filter { inkStroke in
+            inkStroke.contains(where: { displayFrame.contains($0) })
+        }
+        guard !strokesOnThisDisplay.isEmpty,
+              let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let screenshotImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+            return self
+        }
+
+        let pixelWidth = screenshotImage.width
+        let pixelHeight = screenshotImage.height
+        guard let drawingContext = CGContext(
+            data: nil,
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return self
+        }
+
+        drawingContext.draw(screenshotImage, in: CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        drawingContext.setStrokeColor(OpenClickyInkStyle.userInkNSColor.cgColor)
+        drawingContext.setLineWidth(max(4, CGFloat(pixelWidth) / 320))
+        drawingContext.setLineCap(.round)
+        drawingContext.setLineJoin(.round)
+
+        for inkStroke in strokesOnThisDisplay {
+            // Screenshot pixels have a top-left origin; CGContext has bottom-left.
+            let contextPoints = inkStroke.map { globalPoint -> CGPoint in
+                let pixelPoint = screenshotPixelPoint(fromGlobalAppKitPoint: globalPoint)
+                return CGPoint(x: pixelPoint.x, y: CGFloat(pixelHeight) - pixelPoint.y)
+            }
+            guard let firstContextPoint = contextPoints.first else { continue }
+            drawingContext.beginPath()
+            drawingContext.move(to: firstContextPoint)
+            for contextPoint in contextPoints.dropFirst() {
+                drawingContext.addLine(to: contextPoint)
+            }
+            drawingContext.strokePath()
+        }
+
+        guard let annotatedImage = drawingContext.makeImage() else { return self }
+
+        let encodedImageData = NSMutableData()
+        guard let imageDestination = CGImageDestinationCreateWithData(
+            encodedImageData as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            return self
+        }
+        CGImageDestinationAddImage(imageDestination, annotatedImage, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        guard CGImageDestinationFinalize(imageDestination) else { return self }
+
+        return CompanionScreenCapture(
+            imageData: encodedImageData as Data,
+            label: label,
+            isCursorScreen: isCursorScreen,
+            displayWidthInPoints: displayWidthInPoints,
+            displayHeightInPoints: displayHeightInPoints,
+            displayFrame: displayFrame,
+            screenshotWidthInPixels: screenshotWidthInPixels,
+            screenshotHeightInPixels: screenshotHeightInPixels
         )
     }
 }

@@ -2,9 +2,15 @@
 //  GlobalPushToTalkShortcutMonitor.swift
 //  leanring-buddy
 //
-//  Captures push-to-talk keyboard shortcuts while makesomething is running in the
-//  background. Uses a listen-only CGEvent tap so modifier-only shortcuts like
-//  ctrl + option behave more like a real system-wide voice tool.
+//  Captures push-to-talk keyboard shortcuts while OpenClicky is running in the
+//  background, so modifier-only shortcuts like ctrl + option behave like a real
+//  system-wide voice tool.
+//
+//  The tap is an active (not listen-only) tap for one reason: while the talk
+//  shortcut is held, mouse drags become ink the user draws on screen to show
+//  OpenClicky what they mean. Those mouse events are swallowed so the app
+//  underneath doesn't also select text or drag windows. Every other event,
+//  and all mouse events while the shortcut is up, pass through untouched.
 //
 
 import AppKit
@@ -18,6 +24,15 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     let dictationShortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
     /// Tracks the dictation chord separately from the talk chord.
     private var isDictationShortcutCurrentlyPressed = false
+
+    /// A point of user ink, in global AppKit coordinates (bottom-left origin).
+    enum InkEvent {
+        case strokeBegan(CGPoint)
+        case strokeMoved(CGPoint)
+        case strokeEnded(CGPoint)
+    }
+    /// Mouse drags made while the talk shortcut is held.
+    let inkEventPublisher = PassthroughSubject<InkEvent, Never>()
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
@@ -38,7 +53,10 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         // refreshAllPermissions → start() every few seconds.
         guard globalEventTap == nil else { return }
 
-        let monitoredEventTypes: [CGEventType] = [.flagsChanged, .keyDown, .keyUp]
+        let monitoredEventTypes: [CGEventType] = [
+            .flagsChanged, .keyDown, .keyUp,
+            .leftMouseDown, .leftMouseDragged, .leftMouseUp
+        ]
         let eventMask = monitoredEventTypes.reduce(CGEventMask(0)) { currentMask, eventType in
             currentMask | (CGEventMask(1) << eventType.rawValue)
         }
@@ -61,7 +79,8 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         guard let globalEventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            // Active tap so ink drags can be swallowed (see file header).
+            options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
@@ -102,6 +121,43 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
     }
 
+    private var isInkStrokeInProgress = false
+
+    /// While the talk shortcut is held, mouse drags draw ink and are swallowed.
+    /// Otherwise mouse events pass straight through.
+    private func handleMouseEventForInk(eventType: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let isDrawingAllowed = isShortcutCurrentlyPressed
+        guard isDrawingAllowed || isInkStrokeInProgress else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let inkPoint = Self.convertQuartzGlobalPointToAppKit(event.location)
+
+        switch eventType {
+        case .leftMouseDown:
+            isInkStrokeInProgress = true
+            inkEventPublisher.send(.strokeBegan(inkPoint))
+        case .leftMouseDragged:
+            guard isInkStrokeInProgress else { return Unmanaged.passUnretained(event) }
+            inkEventPublisher.send(.strokeMoved(inkPoint))
+        case .leftMouseUp:
+            guard isInkStrokeInProgress else { return Unmanaged.passUnretained(event) }
+            isInkStrokeInProgress = false
+            inkEventPublisher.send(.strokeEnded(inkPoint))
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Swallow: the click/drag was for drawing, not for the app underneath.
+        return nil
+    }
+
+    /// CGEvent locations use a top-left origin at the primary display; AppKit uses bottom-left.
+    private static func convertQuartzGlobalPointToAppKit(_ quartzPoint: CGPoint) -> CGPoint {
+        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? 0
+        return CGPoint(x: quartzPoint.x, y: primaryScreenHeight - quartzPoint.y)
+    }
+
     /// Fn + Control held together (and Option not held, so it never collides with
     /// the Control + Option talk shortcut) means "dictate".
     private func handleDictationShortcut(eventType: CGEventType, modifierFlagsRawValue: UInt64) {
@@ -131,6 +187,10 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
                 CGEvent.tapEnable(tap: globalEventTap, enable: true)
             }
             return Unmanaged.passUnretained(event)
+        }
+
+        if eventType == .leftMouseDown || eventType == .leftMouseDragged || eventType == .leftMouseUp {
+            return handleMouseEventForInk(eventType: eventType, event: event)
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))

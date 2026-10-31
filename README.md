@@ -10,10 +10,14 @@ OpenClicky is a fork of [Clicky](https://github.com/farzaa/clicky) by Farza (MIT
 
 **Talk.** Hold **Control + Option**, ask anything out loud, and let go. OpenClicky screenshots your screen, asks Claude through your local Claude Code, and answers out loud with captions next to your cursor. It remembers the conversation (the last 40 messages) and what it learns about you.
 
-**Point and draw.** While it talks, the blue cursor flies to the thing it's describing, and it can draw on your screen in a marker style:
+**Draw on your screen to ask.** While holding Control + Option, drag with the mouse or trackpad to circle, underline or arrow the thing you mean ("what's *this* number?"). Your marks show up in coral on screen and are burned into the screenshot Claude sees. The drag doesn't reach the app underneath, so nothing gets selected or moved.
+
+**Status pill.** A black pill hangs from the top of the screen, wrapping the notch on MacBooks. It shows **Listening** with a live mic waveform, **Thinking**, or **Speaking**, expands to show captions of what OpenClicky is saying, and shows how many agents are working.
+
+**Point and draw back.** While it talks, the blue cursor flies to the thing it's describing, and it can draw on your screen in a gold marker style:
 - circles, arrows, highlights and underlines
 - callout labels with leader lines that name the parts of whatever's on screen ("Lift fan", "22-pin end")
-- sticky notes for warnings and key tips ("Power off / Unplug first")
+- sticky notes with a curled corner for warnings and key tips ("Power off / Unplug first")
 
 **Real-time graphics.** When a picture explains it better, Claude draws an explainer card next to what you're looking at:
 - **whiteboard diagrams**: hand-drawn boxes, arrows and numbered steps on grid paper that draw themselves in while it talks
@@ -21,7 +25,7 @@ OpenClicky is a fork of [Clicky](https://github.com/farzaa/clicky) by Farza (MIT
 
 It starts talking right away while the card is still being drawn.
 
-**Agents (do anything).** Ask it to *do* something ("research the best free video editors and make me a comparison", "organize my downloads folder", "make a reminder for Friday", "build me a little web page") and it hands the job to a background **Claude Code agent**. Agents get the full toolset: files, terminal, web search, Mac app control through AppleScript, and every MCP server you've connected to Claude Code (Gmail, Notion, Linear, calendars and so on). Each agent gets a card in the top-right corner showing what it's doing live:
+**Agents (do anything).** Ask it to *do* something ("research the best free video editors and make me a comparison", "organize my downloads folder", "make a reminder for Friday", "build me a little web page") and it hands the job to a background **Claude Code agent**. Agents get the full toolset: files, terminal, web search, Mac app control through AppleScript, and every MCP server you've connected to Claude Code (Gmail, Notion, Linear, calendars and so on). Each agent gets a frosted-glass card in the top-right corner showing what it's doing live, with an elapsed timer:
 - a 5-second countdown, so you can cancel a misheard request
 - approval prompts for sensitive actions: **Allow once / Always allow / Not now** (or set "Always approve" in Settings)
 - Stop, Retry, Open folder, and Reply with follow-ups to the same agent

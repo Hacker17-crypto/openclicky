@@ -99,12 +99,21 @@ final class CompanionManager: ObservableObject {
     /// Whiteboard diagrams and 3D models Claude draws on screen.
     private let visualExplainerCardManager = VisualExplainerCardManager()
 
-    /// Shows the spoken words next to the cursor while OpenClicky talks.
-    private let captionsOverlayManager = CompanionResponseOverlayManager()
+    /// Notch-style status pill at the top of the screen (listening / thinking /
+    /// speaking + captions + agent count).
+    private lazy var statusPillPanelManager = StatusPillPanelManager(companionManager: self)
 
     /// Circles, arrows, highlights, callout labels and sticky notes currently drawn on screen.
     /// Rendered by ScreenAnnotationLayerView inside each screen's overlay window.
     @Published private(set) var activeScreenAnnotations: [ScreenAnnotation] = []
+
+    /// Freehand strokes the user drew while holding the talk shortcut, in global
+    /// AppKit coordinates. Shown on screen and burned into the screenshot Claude sees.
+    @Published private(set) var userInkStrokes: [[CGPoint]] = []
+    private var inkEventCancellable: AnyCancellable?
+
+    /// Captions for the status pill: what OpenClicky is currently saying.
+    @Published private(set) var currentCaptionText: String?
     private var screenAnnotationClearTask: Task<Void, Never>?
 
     /// Text already handed to TTS while a visual was still streaming in, so the
@@ -209,6 +218,8 @@ final class CompanionManager: ObservableObject {
         bindShortcutTransitions()
         bindDictationShortcutTransitions()
         bindAgentNotifications()
+        bindUserInk()
+        _ = statusPillPanelManager
         // Locate the `claude` binary (and the user's login-shell PATH) up front
         // so the first push-to-talk doesn't pay for the lookup.
         ClaudeCodeCLIClient.warmUpInstallationLookupInBackground()
@@ -513,7 +524,8 @@ final class CompanionManager: ObservableObject {
             guard !buddyDictationManager.isDictationInProgress else { return }
             guard !dictationController.isBusy else { return }
             clearScreenAnnotations()
-            captionsOverlayManager.hideOverlay()
+            userInkStrokes = []
+            currentCaptionText = nil
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
@@ -639,8 +651,13 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                // Capture all connected screens so the AI has full context, with
+                // anything the user drew while talking burned into the images.
+                let inkStrokesForThisQuestion = userInkStrokes
+                let rawScreenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                let screenCaptures = inkStrokesForThisQuestion.isEmpty
+                    ? rawScreenCaptures
+                    : rawScreenCaptures.map { $0.drawingInkStrokes(inkStrokesForThisQuestion) }
 
                 guard !Task.isCancelled else { return }
 
@@ -661,7 +678,9 @@ final class CompanionManager: ObservableObject {
                     images: labeledImages,
                     systemPrompt: makeVoiceResponseSystemPrompt(),
                     conversationHistory: historyForAPI,
-                    userPrompt: transcript,
+                    userPrompt: inkStrokesForThisQuestion.isEmpty
+                        ? transcript
+                        : transcript + "\n\n(i drew on my screen in orange to show you what i mean.)",
                     onTextChunk: { [weak self] accumulatedResponseText in
                         // Spinner stays until TTS plays. If Claude starts drawing a
                         // visual, speak the explanation now instead of waiting for it.
@@ -694,7 +713,7 @@ final class CompanionManager: ObservableObject {
                     from: parsedResponseTags.drawingRequests,
                     screenCaptures: screenCaptures
                 )
-                if !newScreenAnnotations.isEmpty {
+                if !newScreenAnnotations.isEmpty || !userInkStrokes.isEmpty {
                     showScreenAnnotations(newScreenAnnotations)
                 }
 
@@ -873,6 +892,9 @@ final class CompanionManager: ObservableObject {
     agents:
     you can't click, type, or run things yourself, but you can hand work off to an agent that runs in the background on the user's mac with full tools (files, terminal, web search, and any apps the user has connected). when the user asks you to actually do something rather than explain it, like research a topic, write or edit a file, build something, organize files, or send or draft something, say one short spoken line acknowledging it (like "on it, i'll have an agent handle that") and append [AGENT:<a complete, self-contained description of the task, including any details from the screen the agent will need>]. don't use an agent for things you can answer by talking.
 
+    the user's own marks:
+    the user can draw on their screen while talking to you. if a screenshot has orange hand-drawn marks, the user drew them to show you what they mean: treat whatever they circled, underlined or pointed at as the focus of their question. don't describe the marks themselves.
+
     memory:
     if the user tells you something about themselves that would be useful to remember in future conversations (their name, job, projects, preferences, tools they use), append [REMEMBER:<the fact, written in third person, like "the user's name is alex">]. only remember things they'd want remembered.
 
@@ -947,15 +969,43 @@ final class CompanionManager: ObservableObject {
     /// a few seconds after speech ends.
     private func showCaptions(for spokenText: String) {
         guard OpenClickySettings.shared.showsCaptionsWhileTalking else { return }
-        captionsOverlayManager.showOverlayAndBeginStreaming()
-        captionsOverlayManager.updateStreamingText(spokenText)
+        currentCaptionText = spokenText
 
         Task {
             while elevenLabsTTSClient.isPlaying {
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
-            captionsOverlayManager.finishStreaming()
+            // Linger briefly so the last words can be read, unless a new reply replaced them.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if currentCaptionText == spokenText {
+                currentCaptionText = nil
+            }
         }
+    }
+
+    /// Whether audio is playing right now (for the status pill's "Speaking" state).
+    var isSpeakingAloud: Bool { elevenLabsTTSClient.isPlaying }
+
+    /// Collects the user's ink strokes from the global event tap.
+    private func bindUserInk() {
+        inkEventCancellable = globalPushToTalkShortcutMonitor.inkEventPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] inkEvent in
+                guard let self else { return }
+                switch inkEvent {
+                case .strokeBegan(let inkPoint):
+                    self.userInkStrokes.append([inkPoint])
+                case .strokeMoved(let inkPoint), .strokeEnded(let inkPoint):
+                    guard var currentInkStroke = self.userInkStrokes.last else { return }
+                    // Skip points closer than 2pt apart to keep strokes light.
+                    if let lastInkPoint = currentInkStroke.last,
+                       hypot(inkPoint.x - lastInkPoint.x, inkPoint.y - lastInkPoint.y) < 2 {
+                        return
+                    }
+                    currentInkStroke.append(inkPoint)
+                    self.userInkStrokes[self.userInkStrokes.count - 1] = currentInkStroke
+                }
+            }
     }
 
     /// Draws annotations and removes them a few seconds after OpenClicky stops talking.
@@ -981,9 +1031,10 @@ final class CompanionManager: ObservableObject {
     private func clearScreenAnnotations() {
         screenAnnotationClearTask?.cancel()
         screenAnnotationClearTask = nil
-        guard !activeScreenAnnotations.isEmpty else { return }
+        guard !activeScreenAnnotations.isEmpty || !userInkStrokes.isEmpty else { return }
         withAnimation(.easeIn(duration: 0.5)) {
             activeScreenAnnotations = []
+            userInkStrokes = []
         }
     }
 

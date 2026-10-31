@@ -51,6 +51,8 @@ Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (Visu
 - **Drawing**: annotations are stored in global AppKit coordinates in `CompanionManager.activeScreenAnnotations` and rendered per screen by `ScreenAnnotationLayerView` inside BlueCursorView. They clear 5 seconds after TTS ends or on the next press.
 - **Visual cards**: one WKWebView NSPanel at a time. Diagrams are SVG with a stroke-draw animation; 3D is a three.js r160 script (CDN importmap) run via `new Function` with helpers (material, addPart, addLabel, addArrow). TTS starts as soon as `<visual` appears in the stream (`speakEarlyIfVisualHasStarted`).
 - **Dictation**: Fn+Control (without Option) is detected in GlobalPushToTalkShortcutMonitor, handled by OpenClickyDictationController (hold, double-tap hands-free, Claude polish, "draft ..." screen-aware writing), and inserted with pasteboard + Cmd+V (FocusedAppTextInserter), restoring the clipboard afterwards.
+- **User ink**: the CGEvent tap is an active tap (`.defaultTap`). While the talk shortcut is held, left-mouse down/drag/up events become `inkEventPublisher` events and are swallowed (return nil). Everything else passes through. `CompanionManager.userInkStrokes` (global AppKit coordinates) is rendered in ScreenAnnotationLayerView and burned into the JPEGs (`CompanionScreenCapture.drawingInkStrokes`) before they're sent to Claude.
+- **Status pill**: `StatusPillPanel.swift`, an `.statusBar`-level click-through panel at top center that sizes around the notch (`auxiliaryTopLeftArea/RightArea`). Captions come from `CompanionManager.currentCaptionText`; the speaking state is polled from the TTS client.
 - **Memory/settings**: OpenClickySettings (UserDefaults), OpenClickyMemoryStore (`PROFILE.md` + `conversation.json` in Application Support, 20 exchanges), Settings window from the panel footer.
 
 ### Key Architecture Decisions
@@ -94,6 +96,7 @@ Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (Visu
 | `OpenClickyDictationController.swift` | ~270 | Fn+Control dictation, hands-free double-tap, Claude polish, screen-aware drafting, FocusedAppTextInserter. |
 | `OpenClickySettings.swift` | ~210 | User preferences + OpenClickyMemoryStore (PROFILE.md, persisted conversation). |
 | `OpenClickySettingsWindow.swift` | ~260 | Settings window (voice, dictation, agents, memory, shortcuts). |
+| `StatusPillPanel.swift` | ~330 | Notch-style status pill: listening/thinking/speaking, live waveform, captions, agent count. |
 | `ElevenLabsTTSClient.swift` | ~87 | Optional ElevenLabs TTS client using the user's own key directly. Plays audio via `AVAudioPlayer`. |
 | `LocalSpeechTTSClient.swift` | ~165 | `CompanionTextToSpeechClient` protocol, default macOS `AVSpeechSynthesizer` client, ElevenLabs→macOS fallback wrapper, and factory. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |

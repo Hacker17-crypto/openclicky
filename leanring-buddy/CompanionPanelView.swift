@@ -138,7 +138,7 @@ struct CompanionPanelView: View {
                 Text("Hold Control+Option to talk.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
-                Text("Say \"agent, ...\" to hand off a task. Hold Fn+Control to dictate.")
+                Text("While holding, drag to draw on screen. Say \"agent, ...\" to hand off a task. Hold Fn+Control to dictate.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
             }

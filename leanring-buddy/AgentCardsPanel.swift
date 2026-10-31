@@ -125,6 +125,7 @@ struct AgentCardsStackView: View {
             }
         }
         .padding(6)
+        .animation(.spring(response: 0.4, dampingFraction: 0.82), value: agentManager.agents.map(\.id))
         .frame(width: 340, alignment: .topTrailing)
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -142,8 +143,9 @@ private struct AgentCardView: View {
             header
 
             Text(agent.taskDescription)
-                .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textTertiary)
+                .font(.system(size: 11.5))
+                .foregroundColor(Color.white.opacity(0.55))
+                .lineSpacing(1.5)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -151,42 +153,63 @@ private struct AgentCardView: View {
 
             actionButtons
         }
-        .padding(12)
+        .padding(.horizontal, 14)
+        .padding(.top, 13)
+        .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(DS.Colors.surface1.opacity(0.96))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(statusAccentColor.opacity(0.45), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.35), radius: 14, x: 0, y: 6)
+            ZStack {
+                // Frosted glass: blur of whatever is behind the card, tinted dark.
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(red: 0.09, green: 0.09, blue: 0.11).opacity(0.72))
+            }
+            .environment(\.colorScheme, .dark)
         )
+        .overlay(alignment: .bottom) {
+            if agent.status == .working {
+                AgentWorkingShimmerBar()
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(agent.status == .needsApproval ? Color.orange.opacity(0.45) : Color.white.opacity(0.09), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .shadow(color: Color.black.opacity(0.4), radius: 18, x: 0, y: 8)
+        .transition(.asymmetric(
+            insertion: .move(edge: .trailing).combined(with: .opacity),
+            removal: .opacity.combined(with: .scale(scale: 0.95))
+        ))
     }
 
     // MARK: Header
 
     private var header: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(statusAccentColor)
-                .frame(width: 8, height: 8)
-                .shadow(color: statusAccentColor.opacity(0.7), radius: 4)
-
             Text(agent.name)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(DS.Colors.textPrimary)
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundColor(Color.white.opacity(0.95))
+                .lineLimit(1)
 
             Spacer()
 
-            Text(statusLabel)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
+            TimelineView(.periodic(from: .now, by: 1)) { timelineContext in
+                Text(statusLabel(at: timelineContext.date))
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundColor(statusAccentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(statusAccentColor.opacity(0.15)))
+            }
 
             Button(action: { agentManager.dismissAgent(agent) }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(Color.white.opacity(0.55))
                     .frame(width: 18, height: 18)
                     .background(Circle().fill(Color.white.opacity(0.08)))
             }
@@ -204,8 +227,9 @@ private struct AgentCardView: View {
         case .finished:
             if let finalSummaryText = agent.finalSummaryText {
                 Text(finalSummaryText)
-                    .font(.system(size: 12))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(Color.white.opacity(0.85))
+                    .lineSpacing(2)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -225,15 +249,22 @@ private struct AgentCardView: View {
 
         case .needsApproval:
             if let pendingApprovalRequest = agent.pendingApprovalRequest {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Wants to:")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(DS.Colors.textTertiary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(pendingApprovalRequest.toolName == "Bash" ? "Wants to run:" : "Wants to:")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.7))
                     Text(pendingApprovalRequest.actionSummary)
                         .font(.system(size: 12, weight: .medium, design: pendingApprovalRequest.toolName == "Bash" ? .monospaced : .default))
-                        .foregroundColor(DS.Colors.textPrimary)
-                        .lineLimit(4)
+                        .foregroundColor(Color.white.opacity(0.95))
+                        .lineLimit(5)
                         .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(Color.black.opacity(0.35))
+                        )
                 }
             }
 
@@ -242,12 +273,12 @@ private struct AgentCardView: View {
                 if agent.status == .working {
                     ProgressView()
                         .controlSize(.small)
-                        .scaleEffect(0.7)
+                        .scaleEffect(0.6)
                         .frame(width: 14, height: 14)
                 }
                 Text(agent.latestActivityText)
-                    .font(.system(size: 12))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(Color.white.opacity(0.85))
                     .lineLimit(2)
             }
         }
@@ -325,25 +356,28 @@ private struct AgentCardView: View {
     private func cardButton(_ title: String, isProminent: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(isProminent ? DS.Colors.textOnAccent : DS.Colors.textSecondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundColor(isProminent ? Color.white : Color.white.opacity(0.82))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 6)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(isProminent ? DS.Colors.accent : Color.white.opacity(0.08))
                 )
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(AgentCardButtonPressStyle())
         .pointerCursor()
     }
 
     // MARK: Status Styling
 
-    private var statusLabel: String {
+    private func statusLabel(at currentDate: Date) -> String {
         switch agent.status {
         case .startingSoon(let secondsRemaining): return "starting in \(secondsRemaining)s"
-        case .working: return "working"
+        case .working:
+            let elapsedSeconds = max(0, Int(currentDate.timeIntervalSince(agent.createdAt)))
+            return String(format: "working · %d:%02d", elapsedSeconds / 60, elapsedSeconds % 60)
         case .needsApproval: return "needs you"
         case .finished: return "done"
         case .failed: return "failed"
@@ -353,12 +387,42 @@ private struct AgentCardView: View {
 
     private var statusAccentColor: Color {
         switch agent.status {
-        case .startingSoon: return Color.gray
-        case .working: return DS.Colors.accent
-        case .needsApproval: return Color.orange
-        case .finished: return Color.green
-        case .failed: return Color.red
-        case .stopped: return Color.gray
+        case .startingSoon: return Color(white: 0.7)
+        case .working: return Color(red: 0.49, green: 0.77, blue: 1.0)
+        case .needsApproval: return Color(red: 0.98, green: 0.75, blue: 0.14)
+        case .finished: return Color(red: 0.29, green: 0.87, blue: 0.5)
+        case .failed: return Color(red: 0.97, green: 0.44, blue: 0.44)
+        case .stopped: return Color(white: 0.6)
         }
+    }
+}
+
+/// Thin light sweep along the bottom edge while an agent works.
+private struct AgentWorkingShimmerBar: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timelineContext in
+            GeometryReader { geometry in
+                let sweepProgress = CGFloat(timelineContext.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6)
+                let sweepWidth = geometry.size.width * 0.45
+                LinearGradient(
+                    colors: [Color.clear, Color(red: 0.49, green: 0.77, blue: 1.0), Color.clear],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: sweepWidth, height: 2)
+                .offset(x: -sweepWidth + sweepProgress * (geometry.size.width + sweepWidth))
+            }
+        }
+        .frame(height: 2)
+    }
+}
+
+/// Slight dim and shrink on press so buttons feel tactile.
+private struct AgentCardButtonPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

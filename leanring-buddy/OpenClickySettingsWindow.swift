@@ -235,6 +235,7 @@ struct OpenClickySettingsView: View {
     private var shortcutsSection: some View {
         Section("Shortcuts") {
             LabeledContent("Talk", value: "Hold Control + Option")
+            LabeledContent("Draw on screen", value: "Hold Control + Option and drag")
             LabeledContent("Agent", value: "Hold Control + Option, say \"agent, ...\"")
             LabeledContent("Dictate", value: "Hold Fn + Control")
             LabeledContent("Hands-free dictation", value: "Double-tap Fn + Control")
