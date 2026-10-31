@@ -495,7 +495,7 @@ private struct HandDrawnAnnotationView: View {
                             .shadow(color: Color.black.opacity(0.28), radius: 4, x: 0, y: 2)
                     )
                     .fixedSize()
-                    .rotationEffect(.degrees(-2 - 4 * (1 - labelAppearanceProgress)))
+                    .rotationEffect(.degrees(-2 - 4 * Double(1 - labelAppearanceProgress)))
                     .scaleEffect(0.6 + 0.4 * labelAppearanceProgress)
                     .opacity(Double(labelAppearanceProgress))
                     .position(labelPosition)

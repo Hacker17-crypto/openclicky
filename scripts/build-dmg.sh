@@ -42,10 +42,13 @@ xcodebuild \
   CODE_SIGN_IDENTITY="-" \
   DEVELOPMENT_TEAM="" \
   ENABLE_HARDENED_RUNTIME=NO \
-  build | tee "$DERIVED_DATA_PATH-xcodebuild.log" | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+  build > "$DERIVED_DATA_PATH-xcodebuild.log" 2>&1 || true
 
-if [ ! -d "$APP_PATH" ]; then
-  echo "✖ Build failed. Full log: $DERIVED_DATA_PATH-xcodebuild.log"
+# Xcode creates the .app folder even when compilation fails, so check for real success.
+if ! grep -q "BUILD SUCCEEDED" "$DERIVED_DATA_PATH-xcodebuild.log" || [ ! -x "$APP_PATH/Contents/MacOS/OpenClicky" ]; then
+  echo "✖ Build failed:"
+  grep -E "error:" "$DERIVED_DATA_PATH-xcodebuild.log" | sort -u
+  echo "Full log: $DERIVED_DATA_PATH-xcodebuild.log"
   exit 1
 fi
 

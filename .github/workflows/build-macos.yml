@@ -56,8 +56,17 @@ jobs:
             CODE_SIGN_IDENTITY="-" \
             DEVELOPMENT_TEAM="" \
             ENABLE_HARDENED_RUNTIME=NO \
-            build | tee xcodebuild.log | grep -E "error:|warning: .*deprecated|BUILD (SUCCEEDED|FAILED)" || true
-          test -d build/Build/Products/Release/OpenClicky.app || { echo "::error::Build failed, see xcodebuild.log"; tail -100 xcodebuild.log; exit 1; }
+            build > xcodebuild.log 2>&1 || true
+          # Xcode creates the .app folder even when compilation fails, so check the
+          # log for success and that the executable actually exists.
+          if ! grep -q "BUILD SUCCEEDED" xcodebuild.log || [ ! -x build/Build/Products/Release/OpenClicky.app/Contents/MacOS/OpenClicky ]; then
+            echo "::error::Build failed"
+            grep -E "error:" xcodebuild.log | sed -E "s#$GITHUB_WORKSPACE/##" | sort -u | while read -r errorLine; do echo "::error::$errorLine"; done
+            tail -60 xcodebuild.log
+            exit 1
+          fi
+          grep -cE "warning:" xcodebuild.log | xargs echo "Warnings:"
+          echo "BUILD SUCCEEDED" 
 
       - name: Package OpenClicky.dmg
         run: |
