@@ -14,7 +14,7 @@ OpenClicky is a fork of [Clicky](https://github.com/farzaa/clicky) by Farza (MIT
 
 **Status pill.** A black pill hangs from the top of the screen, wrapping the notch on MacBooks. It shows **Listening** with a live mic waveform, **Thinking**, or **Speaking**, expands to show captions of what OpenClicky is saying, and shows how many agents are working.
 
-**Point and draw back.** While it talks, the blue cursor flies to the thing it's describing, and it can draw on your screen in a gold marker style:
+**Point and draw back.** While it talks, the blue cursor flies to the thing it's describing, and it draws on your screen like someone with a gold marker. Drawings go on one after another at pen speed, with a glowing pen tip, soft ink bleed, a highlighter that sweeps across, labels that pop out on leader lines, and sticky notes that drop onto the screen. It can draw:
 - circles, arrows, highlights and underlines
 - callout labels with leader lines that name the parts of whatever's on screen ("Lift fan", "22-pin end")
 - sticky notes with a curled corner for warnings and key tips ("Power off / Unplug first")
@@ -32,6 +32,12 @@ It starts talking right away while the card is still being drawn.
 - a spoken summary when it finishes
 
 Say "agent, ..." to skip straight to an agent. Results land in `~/OpenClicky/<date> <agent name>/`.
+
+**Choose how it hears you.** On first launch OpenClicky checks which speech-to-text engines your Mac has and asks you to pick one (change it anytime in Settings → Transcription):
+- **Apple SpeechAnalyzer**: Apple's newest on-device model (macOS 26+). Downloads its language model once.
+- **Whisper (whisper.cpp)**: if you've run `brew install whisper-cpp`. OpenClicky finds ggml models already on disk (`~/.cache/whisper`, `~/whisper.cpp/models`, Homebrew's share folder) and can download Base, Small or Large v3 Turbo for you.
+- **Apple Speech**: built in, on-device, zero setup.
+- AssemblyAI / OpenAI (cloud): only listed if you added your own key.
 
 **Dictation.** Hold **Fn + Control** in any app, speak, and let go: your words are typed where your cursor is. Double-tap Fn + Control for hands-free mode. Start with "draft a reply saying..." and OpenClicky reads the screen and writes the message in your voice. Optional: polish dictation with Claude (removes filler words, fixes punctuation), and a personal dictionary for names and jargon.
 

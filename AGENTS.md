@@ -53,6 +53,8 @@ Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (Visu
 - **Dictation**: Fn+Control (without Option) is detected in GlobalPushToTalkShortcutMonitor, handled by OpenClickyDictationController (hold, double-tap hands-free, Claude polish, "draft ..." screen-aware writing), and inserted with pasteboard + Cmd+V (FocusedAppTextInserter), restoring the clipboard afterwards.
 - **User ink**: the CGEvent tap is an active tap (`.defaultTap`). While the talk shortcut is held, left-mouse down/drag/up events become `inkEventPublisher` events and are swallowed (return nil). Everything else passes through. `CompanionManager.userInkStrokes` (global AppKit coordinates) is rendered in ScreenAnnotationLayerView and burned into the JPEGs (`CompanionScreenCapture.drawingInkStrokes`) before they're sent to Claude.
 - **Status pill**: `StatusPillPanel.swift`, an `.statusBar`-level click-through panel at top center that sizes around the notch (`auxiliaryTopLeftArea/RightArea`). Captions come from `CompanionManager.currentCaptionText`; the speaking state is polled from the TTS client.
+- **Transcription engines**: `TranscriptionEngineCatalog` detects Apple Speech, SpeechAnalyzer (macOS 26), whisper.cpp (`whisper-cli` + `ggml-*.bin` models; downloads from Hugging Face into Application Support/OpenClicky/whisper-models) and keyed cloud engines. The choice lives in UserDefaults `selectedTranscriptionEngine`, which `BuddyTranscriptionProviderFactory` reads first; `BuddyDictationManager.reloadTranscriptionProvider()` hot-swaps it. The first-run chooser window opens from `CompanionManager.askForTranscriptionEngineIfNeeded()`. The whisper.cpp and SpeechAnalyzer sessions are `nonisolated` (audio arrives off the main thread) and self-contained (their own AVAudioConverter and WAV writer).
+- **Drawing animation**: `OpenClickyDrawingTiming` sets pen speed and a 0.38s stagger between drawings. `AnimatedPenStroke` (Animatable) trims the felt-tip stroke and moves the glowing nib along the path each frame.
 - **Memory/settings**: OpenClickySettings (UserDefaults), OpenClickyMemoryStore (`PROFILE.md` + `conversation.json` in Application Support, 20 exchanges), Settings window from the panel footer.
 
 ### Key Architecture Decisions
@@ -97,6 +99,10 @@ Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (Visu
 | `OpenClickySettings.swift` | ~210 | User preferences + OpenClickyMemoryStore (PROFILE.md, persisted conversation). |
 | `OpenClickySettingsWindow.swift` | ~260 | Settings window (voice, dictation, agents, memory, shortcuts). |
 | `StatusPillPanel.swift` | ~330 | Notch-style status pill: listening/thinking/speaking, live waveform, captions, agent count. |
+| `TranscriptionEngineCatalog.swift` | ~330 | Engine list, detection (whisper-cli, ggml models, macOS 26), selection persistence, Whisper model downloads. |
+| `TranscriptionEngineChooser.swift` | ~300 | "How should OpenClicky hear you?" chooser (first-run window and Settings section) with whisper setup and downloads. |
+| `WhisperCppTranscriptionProvider.swift` | ~330 | Local Whisper via whisper-cli: buffer 16 kHz PCM → WAV → `-nt -np -otxt`, vocabulary prompt, marker cleanup. |
+| `AppleSpeechAnalyzerTranscriptionProvider.swift` | ~250 | macOS 26 SpeechAnalyzer/SpeechTranscriber streaming session with asset download and volatile/final results. |
 | `ElevenLabsTTSClient.swift` | ~87 | Optional ElevenLabs TTS client using the user's own key directly. Plays audio via `AVAudioPlayer`. |
 | `LocalSpeechTTSClient.swift` | ~165 | `CompanionTextToSpeechClient` protocol, default macOS `AVSpeechSynthesizer` client, ElevenLabs→macOS fallback wrapper, and factory. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |

@@ -262,7 +262,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
     }
 
-    private let transcriptionProvider: any BuddyTranscriptionProvider
+    private var transcriptionProvider: any BuddyTranscriptionProvider
     private let audioEngine = AVAudioEngine()
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?
     private var activeStartSource: BuddyDictationStartSource?
@@ -285,6 +285,15 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         self.transcriptionProvider = transcriptionProvider
         self.transcriptionProviderDisplayName = transcriptionProvider.displayName
         super.init()
+    }
+
+    /// Re-reads the selected transcription engine (after the user changes it in
+    /// Settings). Takes effect on the next press; ignored mid-dictation.
+    func reloadTranscriptionProvider() {
+        guard !isDictationInProgress else { return }
+        let newTranscriptionProvider = BuddyTranscriptionProviderFactory.makeDefaultProvider()
+        transcriptionProvider = newTranscriptionProvider
+        transcriptionProviderDisplayName = newTranscriptionProvider.displayName
     }
 
     func updateContextualKeyterms(_ contextualKeyterms: [String]) {

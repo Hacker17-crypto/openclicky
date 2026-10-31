@@ -220,6 +220,7 @@ final class CompanionManager: ObservableObject {
         bindAgentNotifications()
         bindUserInk()
         _ = statusPillPanelManager
+        askForTranscriptionEngineIfNeeded()
         // Locate the `claude` binary (and the user's login-shell PATH) up front
         // so the first push-to-talk doesn't pay for the lookup.
         ClaudeCodeCLIClient.warmUpInstallationLookupInBackground()
@@ -985,6 +986,17 @@ final class CompanionManager: ObservableObject {
 
     /// Whether audio is playing right now (for the status pill's "Speaking" state).
     var isSpeakingAloud: Bool { elevenLabsTTSClient.isPlaying }
+
+    /// First launch: show what speech engines this Mac has and let the user pick one.
+    private func askForTranscriptionEngineIfNeeded() {
+        let transcriptionEngineCatalog = TranscriptionEngineCatalog.shared
+        guard !transcriptionEngineCatalog.hasUserChosenEngine else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            TranscriptionEngineChooserWindowManager.shared.showChooserWindow {
+                self?.buddyDictationManager.reloadTranscriptionProvider()
+            }
+        }
+    }
 
     /// Collects the user's ink strokes from the global event tap.
     private func bindUserInk() {

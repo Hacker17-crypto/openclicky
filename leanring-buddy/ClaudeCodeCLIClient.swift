@@ -176,7 +176,7 @@ nonisolated final class ClaudeCodeCLIClient {
     /// Runs a command inside the user's login shell so PATH tweaks from
     /// ~/.zprofile, ~/.bash_profile, etc. (Homebrew, nvm, volta) apply.
     /// Returns the last non-empty line of stdout, or nil on failure/timeout.
-    private static func runLoginShellCommand(_ command: String) -> String? {
+    static func runLoginShellCommand(_ command: String) -> String? {
         let userLoginShellPath = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
         let shellProcess = Process()

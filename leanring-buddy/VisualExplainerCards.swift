@@ -277,7 +277,10 @@ enum VisualExplainerHTMLTemplate {
             background-color: var(--paper);
             background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
             background-size: 22px 22px;
-            box-shadow: 0 10px 30px rgba(0,0,0,.35), 0 0 0 1px rgba(0,0,0,.08); }
+            box-shadow: 0 10px 30px rgba(0,0,0,.35), 0 0 0 1px rgba(0,0,0,.08);
+            transform-origin: 50% 0%; animation: cardIn .5s cubic-bezier(.2,.9,.3,1.15) both; }
+          @keyframes cardIn { from { opacity: 0; transform: translateY(-10px) scale(.96) rotate(-.6deg); }
+                              to { opacity: 1; transform: none; } }
           .title { position: absolute; top: 0; left: 0; right: 0; height: 26px; line-height: 26px; text-align: center;
             font: 500 12px -apple-system, system-ui, sans-serif; color: #8a877e; background: rgba(240,237,228,.85);
             border-bottom: 1px solid #e3dfd2; cursor: move; }

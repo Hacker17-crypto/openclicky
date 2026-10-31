@@ -20,7 +20,7 @@ final class OpenClickySettingsWindowManager {
     func showSettingsWindow(companionManager: CompanionManager) {
         if settingsWindow == nil {
             let newSettingsWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 760),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered,
                 defer: false
@@ -52,6 +52,7 @@ struct OpenClickySettingsView: View {
     var body: some View {
         Form {
             generalSection
+            transcriptionSection
             voiceSection
             dictationSection
             agentsSection
@@ -59,7 +60,8 @@ struct OpenClickySettingsView: View {
             shortcutsSection
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 640)
+        .frame(width: 560, height: 760)
+        .onAppear { TranscriptionEngineCatalog.shared.refresh() }
     }
 
     // MARK: General
@@ -90,6 +92,24 @@ struct OpenClickySettingsView: View {
             }
 
             Button("Watch onboarding again") { companionManager.replayOnboarding() }
+        }
+    }
+
+    // MARK: Transcription
+
+    private var transcriptionSection: some View {
+        Section {
+            TranscriptionEngineChooserView(presentation: .settingsSection) {
+                TranscriptionEngineCatalog.shared.hasUserChosenEngine = true
+                companionManager.buddyDictationManager.reloadTranscriptionProvider()
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("Transcription")
+        } footer: {
+            Text("Now using: \(companionManager.buddyDictationManager.transcriptionProviderDisplayName). Changes apply on your next press.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 

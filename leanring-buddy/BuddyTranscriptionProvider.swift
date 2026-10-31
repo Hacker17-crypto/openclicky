@@ -43,6 +43,13 @@ enum BuddyTranscriptionProviderFactory {
     }
 
     private static func resolveProvider() -> any BuddyTranscriptionProvider {
+        // The engine picked in OpenClicky's chooser wins over Info.plist.
+        if let userSelectedEngineRawValue = UserDefaults.standard.string(forKey: "selectedTranscriptionEngine"),
+           let userSelectedEngine = TranscriptionEngine(rawValue: userSelectedEngineRawValue),
+           let userSelectedProvider = makeProvider(for: userSelectedEngine) {
+            return userSelectedProvider
+        }
+
         let preferredProviderRawValue = AppBundleConfiguration
             .stringValue(forKey: "VoiceTranscriptionProvider")?
             .lowercased()
@@ -96,5 +103,31 @@ enum BuddyTranscriptionProviderFactory {
         }
 
         return AppleSpeechTranscriptionProvider()
+    }
+
+    /// The provider for a user-selected engine, or nil if that engine isn't usable on this Mac
+    /// (falls back to the Info.plist logic, which ends at Apple Speech).
+    private static func makeProvider(for engine: TranscriptionEngine) -> (any BuddyTranscriptionProvider)? {
+        switch engine {
+        case .appleSpeech:
+            return AppleSpeechTranscriptionProvider()
+        case .appleSpeechAnalyzer:
+            if #available(macOS 26.0, *) {
+                return AppleSpeechAnalyzerTranscriptionProvider()
+            }
+            print("⚠️ Transcription: SpeechAnalyzer needs macOS 26, falling back")
+            return nil
+        case .whisperCpp:
+            let whisperProvider = WhisperCppTranscriptionProvider()
+            if whisperProvider.isConfigured { return whisperProvider }
+            print("⚠️ Transcription: \(whisperProvider.unavailableExplanation ?? "Whisper not ready"), falling back")
+            return nil
+        case .assemblyAI:
+            let assemblyAIProvider = AssemblyAIStreamingTranscriptionProvider()
+            return assemblyAIProvider.isConfigured ? assemblyAIProvider : nil
+        case .openAI:
+            let openAIProvider = OpenAIAudioTranscriptionProvider()
+            return openAIProvider.isConfigured ? openAIProvider : nil
+        }
     }
 }

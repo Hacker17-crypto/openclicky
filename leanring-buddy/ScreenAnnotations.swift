@@ -307,45 +307,67 @@ enum ScreenAnnotationFactory {
 
 // MARK: - Overlay Rendering
 
-/// Draws the current annotations that belong to one screen. Lives inside that
-/// screen's click-through overlay window (see BlueCursorView).
+/// Shared timing so every drawing feels like it comes from the same pen.
+enum OpenClickyDrawingTiming {
+    /// Pause between consecutive drawings, like a person moving the pen to the next spot.
+    static let staggerBetweenDrawings: Double = 0.38
+
+    /// Pen speed: longer strokes take longer, within limits.
+    static func strokeDuration(forApproximateLength approximateLength: CGFloat) -> Double {
+        min(1.0, max(0.35, 0.25 + Double(approximateLength) / 1400))
+    }
+
+    /// Quick start, gentle landing: how a confident marker stroke moves.
+    static func penAnimation(duration: Double) -> Animation {
+        .timingCurve(0.45, 0.05, 0.2, 1.0, duration: duration)
+    }
+}
+
+/// Draws the user's ink and the current annotations that belong to one screen.
+/// Lives inside that screen's click-through overlay window (see BlueCursorView).
 struct ScreenAnnotationLayerView: View {
     @ObservedObject var companionManager: CompanionManager
     let screenFrame: CGRect
 
     var body: some View {
         ZStack {
-            // What the user drew while holding the talk shortcut.
+            // What the user drew while holding the talk shortcut (drawn live, no animation).
             ForEach(Array(userInkStrokesOnThisScreen.enumerated()), id: \.offset) { _, inkStrokeLocalPoints in
-                UserInkStrokeShape(localPoints: inkStrokeLocalPoints)
-                    .stroke(
-                        OpenClickyInkStyle.userInkColor,
-                        style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
-                    )
-                    .shadow(color: OpenClickyInkStyle.userInkColor.opacity(0.55), radius: 5)
+                FeltTipStrokeView(
+                    strokePath: UserInkStrokeShape(localPoints: inkStrokeLocalPoints).path(in: .zero),
+                    inkColor: OpenClickyInkStyle.userInkColor,
+                    coreLineWidth: 4
+                )
             }
 
             ForEach(Array(annotationsOnThisScreen.enumerated()), id: \.element.id) { annotationIndex, screenAnnotation in
-                switch screenAnnotation.shape {
-                case .calloutLabel(let globalAnchor):
-                    CalloutLabelAnnotationView(
-                        labelText: screenAnnotation.label ?? "",
-                        anchorPoint: convertGlobalPointToLocal(globalAnchor),
-                        screenSize: screenFrame.size,
-                        paletteIndex: annotationIndex
-                    )
-                case .stickyNote(let globalCenter):
-                    StickyNoteAnnotationView(
-                        noteText: screenAnnotation.label ?? "",
-                        centerPoint: convertGlobalPointToLocal(globalCenter),
-                        screenSize: screenFrame.size
-                    )
-                default:
-                    HandDrawnAnnotationView(
-                        screenAnnotation: screenAnnotation,
-                        screenFrame: screenFrame
-                    )
+                let appearanceDelay = Double(annotationIndex) * OpenClickyDrawingTiming.staggerBetweenDrawings
+                Group {
+                    switch screenAnnotation.shape {
+                    case .calloutLabel(let globalAnchor):
+                        CalloutLabelAnnotationView(
+                            labelText: screenAnnotation.label ?? "",
+                            anchorPoint: convertGlobalPointToLocal(globalAnchor),
+                            screenSize: screenFrame.size,
+                            paletteIndex: annotationIndex,
+                            appearanceDelay: appearanceDelay
+                        )
+                    case .stickyNote(let globalCenter):
+                        StickyNoteAnnotationView(
+                            noteText: screenAnnotation.label ?? "",
+                            centerPoint: convertGlobalPointToLocal(globalCenter),
+                            screenSize: screenFrame.size,
+                            appearanceDelay: appearanceDelay
+                        )
+                    default:
+                        HandDrawnAnnotationView(
+                            screenAnnotation: screenAnnotation,
+                            screenFrame: screenFrame,
+                            appearanceDelay: appearanceDelay
+                        )
+                    }
                 }
+                .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }
         }
         .allowsHitTesting(false)
@@ -375,13 +397,73 @@ struct ScreenAnnotationLayerView: View {
     }
 }
 
-/// One annotation, stroked like a marker: it draws itself in, then stays until
-/// CompanionManager removes it (the removal fades it out).
+/// A marker stroke with real-ink texture: a soft bleed underneath, the solid
+/// core, and a thin sheen on top. `drawProgress` trims it for the draw-in animation.
+private struct FeltTipStrokeView: View {
+    let strokePath: Path
+    let inkColor: Color
+    var coreLineWidth: CGFloat = 3.4
+    var drawProgress: CGFloat = 1
+
+    var body: some View {
+        ZStack {
+            strokePath
+                .trimmedPath(from: 0, to: drawProgress)
+                .stroke(inkColor.opacity(0.22), style: StrokeStyle(lineWidth: coreLineWidth * 3, lineCap: .round, lineJoin: .round))
+                .blur(radius: 1.5)
+            strokePath
+                .trimmedPath(from: 0, to: drawProgress)
+                .stroke(inkColor, style: StrokeStyle(lineWidth: coreLineWidth, lineCap: .round, lineJoin: .round))
+                .shadow(color: Color.black.opacity(0.28), radius: 1.5, x: 0, y: 1)
+            strokePath
+                .trimmedPath(from: 0, to: drawProgress)
+                .stroke(Color.white.opacity(0.35), style: StrokeStyle(lineWidth: max(0.8, coreLineWidth * 0.28), lineCap: .round, lineJoin: .round))
+                .offset(x: -0.6, y: -0.7)
+        }
+    }
+}
+
+/// Animates `drawProgress` frame by frame so the felt-tip trim and the pen nib
+/// travel along the path together (plain state interpolation can't follow a curve).
+private struct AnimatedPenStroke: View, Animatable {
+    let strokePath: Path
+    let inkColor: Color
+    var drawProgress: CGFloat
+
+    // nonisolated: SwiftUI drives animation through the Animatable protocol outside
+    // the main-actor default this project uses.
+    nonisolated var animatableData: CGFloat {
+        get { drawProgress }
+        set { drawProgress = newValue }
+    }
+
+    var body: some View {
+        ZStack {
+            FeltTipStrokeView(strokePath: strokePath, inkColor: inkColor, drawProgress: drawProgress)
+
+            // Glowing pen tip while the stroke is being drawn.
+            if drawProgress > 0.002 && drawProgress < 0.995,
+               let nibPoint = strokePath.trimmedPath(from: 0, to: drawProgress).currentPoint {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: inkColor, radius: 6)
+                    .shadow(color: inkColor.opacity(0.6), radius: 12)
+                    .position(nibPoint)
+            }
+        }
+    }
+}
+
+/// Circles, highlights, underlines and arrows, drawn in with a pen motion.
 private struct HandDrawnAnnotationView: View {
     let screenAnnotation: ScreenAnnotation
     let screenFrame: CGRect
+    let appearanceDelay: Double
 
     @State private var strokeDrawProgress: CGFloat = 0
+    @State private var highlightSweepProgress: CGFloat = 0
+    @State private var labelAppearanceProgress: CGFloat = 0
 
     private let markerColor = OpenClickyInkStyle.claudeMarkerColor
 
@@ -389,37 +471,46 @@ private struct HandDrawnAnnotationView: View {
         ZStack {
             if case .highlight(let globalRect) = screenAnnotation.shape {
                 let localRect = convertGlobalRectToLocal(globalRect).insetBy(dx: -6, dy: -4)
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(markerColor.opacity(0.12 * strokeDrawProgress))
+                // Highlighter wash sweeping left to right.
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(markerColor.opacity(0.24))
                     .frame(width: localRect.width, height: localRect.height)
+                    .mask(alignment: .leading) {
+                        Rectangle().frame(width: localRect.width * highlightSweepProgress)
+                    }
                     .position(x: localRect.midX, y: localRect.midY)
             }
 
-            annotationStrokePath
-                .trim(from: 0, to: strokeDrawProgress)
-                .stroke(markerColor, style: StrokeStyle(lineWidth: 3.2, lineCap: .round, lineJoin: .round))
-                .shadow(color: Color.black.opacity(0.25), radius: 1.5, x: 0, y: 1)
+            AnimatedPenStroke(strokePath: annotationStrokePath, inkColor: markerColor, drawProgress: strokeDrawProgress)
 
             if let label = screenAnnotation.label, !label.isEmpty {
                 Text(label)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(handwrittenFont(size: 15))
                     .foregroundColor(Color(red: 0.16, green: 0.13, blue: 0.04))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
                     .background(
                         RoundedRectangle(cornerRadius: 5, style: .continuous)
                             .fill(markerColor)
-                            .shadow(color: Color.black.opacity(0.25), radius: 3, x: 0, y: 1)
+                            .shadow(color: Color.black.opacity(0.28), radius: 4, x: 0, y: 2)
                     )
                     .fixedSize()
+                    .rotationEffect(.degrees(-2 - 4 * (1 - labelAppearanceProgress)))
+                    .scaleEffect(0.6 + 0.4 * labelAppearanceProgress)
+                    .opacity(Double(labelAppearanceProgress))
                     .position(labelPosition)
-                    .opacity(strokeDrawProgress)
             }
         }
-        .transition(.opacity)
         .onAppear {
-            withAnimation(.easeOut(duration: 0.6)) {
+            let strokeDuration = OpenClickyDrawingTiming.strokeDuration(forApproximateLength: approximateStrokeLength)
+            withAnimation(OpenClickyDrawingTiming.penAnimation(duration: strokeDuration).delay(appearanceDelay)) {
                 strokeDrawProgress = 1
+            }
+            withAnimation(.easeOut(duration: strokeDuration * 0.9).delay(appearanceDelay + strokeDuration * 0.35)) {
+                highlightSweepProgress = 1
+            }
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.6).delay(appearanceDelay + strokeDuration * 0.8)) {
+                labelAppearanceProgress = 1
             }
         }
     }
@@ -444,19 +535,33 @@ private struct HandDrawnAnnotationView: View {
         return CGFloat(sin(seed)) * amplitude
     }
 
+    /// Rough on-screen length, used to pace the pen.
+    private var approximateStrokeLength: CGFloat {
+        switch screenAnnotation.shape {
+        case .circle(_, let radius):
+            return 2 * .pi * radius * 1.15
+        case .highlight(let globalRect):
+            return 2 * (globalRect.width + globalRect.height)
+        case .underline(let globalStart, let globalEnd), .arrow(let globalStart, let globalEnd):
+            return hypot(globalEnd.x - globalStart.x, globalEnd.y - globalStart.y) + 40
+        case .calloutLabel, .stickyNote:
+            return 0
+        }
+    }
+
     private var annotationStrokePath: Path {
         switch screenAnnotation.shape {
         case .circle(let globalCenter, let radius):
             let center = convertGlobalPointToLocal(globalCenter)
             return Path { path in
-                // A loop that overshoots its start a little, like a quick marker circle.
-                let segmentCount = 48
+                // A loose loop that overshoots its start, like a quick marker circle.
+                let segmentCount = 56
                 let totalSweepRadians = 2 * Double.pi * 1.12
                 let startAngleRadians = -Double.pi * 0.65
                 for segmentIndex in 0...segmentCount {
                     let segmentProgress = Double(segmentIndex) / Double(segmentCount)
                     let angleRadians = startAngleRadians + segmentProgress * totalSweepRadians
-                    let wobbledRadius = radius * (1.0 + 0.06 * CGFloat(segmentProgress)) + wobble(segmentIndex / 8, amplitude: 1.5)
+                    let wobbledRadius = radius * (1.0 + 0.07 * CGFloat(segmentProgress)) + wobble(segmentIndex / 8, amplitude: 1.6)
                     let point = CGPoint(
                         x: center.x + wobbledRadius * 1.15 * CGFloat(cos(angleRadians)),
                         y: center.y + wobbledRadius * CGFloat(sin(angleRadians))
@@ -479,10 +584,14 @@ private struct HandDrawnAnnotationView: View {
             let start = convertGlobalPointToLocal(globalStart)
             let end = convertGlobalPointToLocal(globalEnd)
             return Path { path in
-                path.move(to: CGPoint(x: start.x, y: start.y + 3))
-                path.addQuadCurve(
-                    to: CGPoint(x: end.x, y: end.y + 2),
-                    control: CGPoint(x: (start.x + end.x) / 2, y: start.y + 6 + wobble(1, amplitude: 2))
+                // A gentle double-curve, like underlining fast with a marker.
+                let underlineY = start.y + 4
+                let underlineWidth = end.x - start.x
+                path.move(to: CGPoint(x: start.x - 2, y: underlineY))
+                path.addCurve(
+                    to: CGPoint(x: end.x + 2, y: underlineY - 1),
+                    control1: CGPoint(x: start.x + underlineWidth * 0.33, y: underlineY + 4 + wobble(1, amplitude: 1.5)),
+                    control2: CGPoint(x: start.x + underlineWidth * 0.66, y: underlineY - 3 + wobble(2, amplitude: 1.5))
                 )
             }
 
@@ -490,7 +599,7 @@ private struct HandDrawnAnnotationView: View {
             let start = convertGlobalPointToLocal(globalStart)
             let end = convertGlobalPointToLocal(globalEnd)
             return Path { path in
-                // Slightly curved shaft
+                // Slightly curved shaft, then the head, so the pen draws it in that order.
                 let shaftControlPoint = CGPoint(
                     x: (start.x + end.x) / 2 + (end.y - start.y) * 0.12,
                     y: (start.y + end.y) / 2 - (end.x - start.x) * 0.12
@@ -498,15 +607,14 @@ private struct HandDrawnAnnotationView: View {
                 path.move(to: start)
                 path.addQuadCurve(to: end, control: shaftControlPoint)
 
-                // Arrowhead, oriented along the end of the curve
                 let arrowAngleRadians = atan2(end.y - shaftControlPoint.y, end.x - shaftControlPoint.x)
-                let arrowheadLength: CGFloat = 16
+                let arrowheadLength: CGFloat = 17
                 let arrowheadSpreadRadians: CGFloat = .pi / 7
-                path.move(to: CGPoint(
+                path.addLine(to: CGPoint(
                     x: end.x - arrowheadLength * cos(arrowAngleRadians - arrowheadSpreadRadians),
                     y: end.y - arrowheadLength * sin(arrowAngleRadians - arrowheadSpreadRadians)
                 ))
-                path.addLine(to: end)
+                path.move(to: end)
                 path.addLine(to: CGPoint(
                     x: end.x - arrowheadLength * cos(arrowAngleRadians + arrowheadSpreadRadians),
                     y: end.y - arrowheadLength * sin(arrowAngleRadians + arrowheadSpreadRadians)
@@ -523,17 +631,17 @@ private struct HandDrawnAnnotationView: View {
         switch screenAnnotation.shape {
         case .circle(let globalCenter, let radius):
             let center = convertGlobalPointToLocal(globalCenter)
-            return CGPoint(x: center.x, y: center.y + radius + 18)
+            return CGPoint(x: center.x + radius * 0.9, y: center.y + radius + 20)
         case .highlight(let globalRect):
             let localRect = convertGlobalRectToLocal(globalRect)
-            return CGPoint(x: localRect.midX, y: localRect.maxY + 18)
+            return CGPoint(x: localRect.maxX - 30, y: localRect.maxY + 20)
         case .underline(let globalStart, let globalEnd):
             let start = convertGlobalPointToLocal(globalStart)
             let end = convertGlobalPointToLocal(globalEnd)
-            return CGPoint(x: (start.x + end.x) / 2, y: start.y + 20)
+            return CGPoint(x: (start.x + end.x) / 2, y: start.y + 24)
         case .arrow(let globalStart, _):
             let start = convertGlobalPointToLocal(globalStart)
-            return CGPoint(x: start.x, y: start.y - 14)
+            return CGPoint(x: start.x, y: start.y - 16)
         case .calloutLabel(let globalAnchor):
             return convertGlobalPointToLocal(globalAnchor)
         case .stickyNote(let globalCenter):
@@ -553,14 +661,18 @@ private func handwrittenFont(size: CGFloat) -> Font {
 }
 
 /// A pastel tag connected to the thing it names by a thin leader line with a dot,
-/// like the "Lift fan" / "22-pin end" callouts.
+/// like the "Lift fan" / "22-pin end" callouts. Builds itself in three beats:
+/// the dot pops, the line draws out, then the tag springs into place.
 private struct CalloutLabelAnnotationView: View {
     let labelText: String
     let anchorPoint: CGPoint
     let screenSize: CGSize
     let paletteIndex: Int
+    let appearanceDelay: Double
 
-    @State private var appearanceProgress: CGFloat = 0
+    @State private var anchorDotProgress: CGFloat = 0
+    @State private var leaderLineProgress: CGFloat = 0
+    @State private var tagAppearanceProgress: CGFloat = 0
 
     private static let pastelPalette: [(fill: Color, edge: Color)] = [
         (Color(red: 0.86, green: 0.97, blue: 0.86), Color(red: 0.35, green: 0.75, blue: 0.40)),
@@ -571,9 +683,14 @@ private struct CalloutLabelAnnotationView: View {
 
     /// Put the tag above and away from the screen center so it doesn't cover the anchor.
     private var labelCenter: CGPoint {
-        let horizontalOffset: CGFloat = anchorPoint.x > screenSize.width / 2 ? 40 : -40
-        let verticalOffset: CGFloat = anchorPoint.y < 110 ? 70 : -70
+        let horizontalOffset: CGFloat = anchorPoint.x > screenSize.width / 2 ? 46 : -46
+        let verticalOffset: CGFloat = anchorPoint.y < 110 ? 72 : -72
         return CGPoint(x: anchorPoint.x + horizontalOffset, y: anchorPoint.y + verticalOffset)
+    }
+
+    /// Alternate a slight tilt left/right so a group of labels looks hand-placed.
+    private var restingTiltDegrees: Double {
+        paletteIndex % 2 == 0 ? -1.5 : 1.5
     }
 
     var body: some View {
@@ -584,57 +701,70 @@ private struct CalloutLabelAnnotationView: View {
                 path.move(to: anchorPoint)
                 path.addLine(to: labelCenter)
             }
-            .trim(from: 0, to: appearanceProgress)
+            .trimmedPath(from: 0, to: leaderLineProgress)
             .stroke(Color.white.opacity(0.95), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-            .shadow(color: Color.black.opacity(0.45), radius: 2)
+            .shadow(color: Color.black.opacity(0.5), radius: 2)
 
             Circle()
                 .fill(Color.white)
                 .overlay(Circle().stroke(Color.black.opacity(0.6), lineWidth: 1.5))
                 .frame(width: 9, height: 9)
+                .shadow(color: Color.black.opacity(0.35), radius: 2)
+                .scaleEffect(anchorDotProgress)
                 .position(anchorPoint)
 
             Text(labelText)
                 .font(handwrittenFont(size: 16))
                 .foregroundColor(Color(red: 0.12, green: 0.12, blue: 0.14))
-                .padding(.horizontal, 9)
+                .padding(.horizontal, 10)
                 .padding(.vertical, 3)
                 .background(
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 3, style: .continuous).fill(palette.fill)
                         Rectangle().fill(palette.edge).frame(width: 4)
                     }
+                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
                 )
-                .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+                .shadow(color: Color.black.opacity(0.3), radius: 5, x: 0, y: 3)
                 .fixedSize()
-                .scaleEffect(0.6 + 0.4 * appearanceProgress)
-                .opacity(Double(appearanceProgress))
+                .rotationEffect(.degrees(restingTiltDegrees + 8 * Double(1 - tagAppearanceProgress)))
+                .scaleEffect(0.5 + 0.5 * tagAppearanceProgress)
+                .opacity(Double(tagAppearanceProgress))
                 .position(labelCenter)
         }
         .onAppear {
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.7)) {
-                appearanceProgress = 1
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.5).delay(appearanceDelay)) {
+                anchorDotProgress = 1
+            }
+            withAnimation(OpenClickyDrawingTiming.penAnimation(duration: 0.3).delay(appearanceDelay + 0.12)) {
+                leaderLineProgress = 1
+            }
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.58).delay(appearanceDelay + 0.36)) {
+                tagAppearanceProgress = 1
             }
         }
     }
 }
 
-/// A yellow sticky note slapped onto the screen, slightly askew.
+/// A yellow sticky note that drops onto the screen and lands slightly askew.
 private struct StickyNoteAnnotationView: View {
     let noteText: String
     let centerPoint: CGPoint
     let screenSize: CGSize
+    let appearanceDelay: Double
 
-    @State private var appearanceProgress: CGFloat = 0
+    @State private var landingProgress: CGFloat = 0
 
     var body: some View {
         Text(noteText)
             .font(handwrittenFont(size: 17))
             .foregroundColor(Color(red: 0.18, green: 0.16, blue: 0.10))
             .multilineTextAlignment(.leading)
+            .lineSpacing(2)
             .frame(width: 170, alignment: .topLeading)
             .frame(minHeight: 120, alignment: .topLeading)
             .padding(16)
+            .padding(.top, 4)
             .background(
                 ZStack(alignment: .top) {
                     StickyNoteBodyShape(foldSize: 26).fill(Color(red: 1.0, green: 0.92, blue: 0.55))
@@ -644,14 +774,21 @@ private struct StickyNoteAnnotationView: View {
                     StickyNoteFoldShape(foldSize: 26).fill(Color(red: 0.91, green: 0.79, blue: 0.33))
                 }
             )
-            .shadow(color: Color.black.opacity(0.35), radius: 10, x: 2, y: 6)
-            .rotationEffect(.degrees(-3))
-            .scaleEffect(0.7 + 0.3 * appearanceProgress)
-            .opacity(Double(appearanceProgress))
+            // The shadow tightens as the note "lands" on the screen.
+            .shadow(
+                color: Color.black.opacity(0.18 + 0.17 * Double(landingProgress)),
+                radius: 22 - 12 * landingProgress,
+                x: 2,
+                y: 14 - 8 * landingProgress
+            )
+            .rotationEffect(.degrees(-3 - 9 * Double(1 - landingProgress)))
+            .scaleEffect(1.18 - 0.18 * landingProgress)
+            .offset(y: -36 * (1 - landingProgress))
+            .opacity(Double(min(1, landingProgress * 2.5)))
             .position(clampedCenter)
             .onAppear {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.65)) {
-                    appearanceProgress = 1
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.6).delay(appearanceDelay)) {
+                    landingProgress = 1
                 }
             }
     }
