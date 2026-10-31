@@ -14,6 +14,8 @@ OpenClicky is a fork of [Clicky](https://github.com/farzaa/clicky) by Farza (MIT
 
 **Status pill.** A black pill hangs from the top of the screen, wrapping the notch on MacBooks. It shows **Listening** with a live mic waveform, **Thinking**, or **Speaking**, expands to show captions of what OpenClicky is saying, and shows how many agents are working.
 
+**A teaching board, every time.** Ask anything and a whiteboard appears next to your work and fills in live while Claude thinks: "solve this" gets the full worked solution step by step with real math typesetting, a boxed answer and a check; "why is this broken" gets what's wrong, why, and the fix in highlighted code; "how does X work" gets the key idea, a small diagram and the takeaway. OpenClicky only says one to three sentences out loud, so it never rambles. The board stays up so you can ask follow-ups ("why step 2?", "do the next one") and it redraws. Close it with × or Escape, or drag it by its title.
+
 **Point and draw back.** While it talks, the blue cursor flies to the thing it's describing, and it draws on your screen like someone with a gold marker. Drawings go on one after another at pen speed, with a glowing pen tip, soft ink bleed, a highlighter that sweeps across, labels that pop out on leader lines, and sticky notes that drop onto the screen. It can draw:
 - circles, arrows, highlights and underlines
 - callout labels with leader lines that name the parts of whatever's on screen ("Lift fan", "22-pin end")

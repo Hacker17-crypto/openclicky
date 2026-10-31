@@ -99,6 +99,11 @@ final class CompanionManager: ObservableObject {
     /// Whiteboard diagrams and 3D models Claude draws on screen.
     private let visualExplainerCardManager = VisualExplainerCardManager()
 
+    /// The teaching board: a whiteboard that fills in live with worked steps, math, code and diagrams.
+    private let teachingBoardPanelManager = TeachingBoardPanelManager()
+    /// Whether this reply has already opened its board (a new reply's board replaces the old one).
+    private var hasOpenedBoardForCurrentResponse = false
+
     /// Notch-style status pill at the top of the screen (listening / thinking /
     /// speaking + captions + agent count).
     private lazy var statusPillPanelManager = StatusPillPanelManager(companionManager: self)
@@ -347,6 +352,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask = nil
         agentManager.shutDownAllAgents()
         visualExplainerCardManager.closeAllCards()
+        teachingBoardPanelManager.closeBoard()
         dictationShortcutTransitionCancellable?.cancel()
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
@@ -648,6 +654,7 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
         earlySpokenResponseText = nil
         streamingSpeechSegmenter = StreamingSpeechSegmenter()
+        hasOpenedBoardForCurrentResponse = false
 
         // "agent, ..." skips the conversation and goes straight to an agent.
         if let explicitAgentTask = Self.explicitAgentTask(fromTranscript: transcript) {
@@ -703,7 +710,17 @@ final class CompanionManager: ObservableObject {
 
                 // Pull out visuals first (they can contain brackets), then the
                 // drawing/agent/memory tags, then the [POINT:...] tag.
-                let (responseTextWithoutVisuals, visualRequests) = VisualExplainerParser.extractVisuals(from: fullResponseText)
+                // The board block comes out first: it's shown, never spoken or parsed for tags.
+                let (responseTextWithoutBoard, finalBoardText) = TeachingBoardParser.extractBoard(from: fullResponseText)
+                if let finalBoardText {
+                    if !hasOpenedBoardForCurrentResponse {
+                        hasOpenedBoardForCurrentResponse = true
+                        teachingBoardPanelManager.beginNewBoard(nearScreenPoint: NSEvent.mouseLocation, preferLeftSide: agentManager.hasAnyAgents)
+                    }
+                    teachingBoardPanelManager.updateBoard(boardText: finalBoardText, isComplete: true)
+                }
+
+                let (responseTextWithoutVisuals, visualRequests) = VisualExplainerParser.extractVisuals(from: responseTextWithoutBoard)
                 let parsedResponseTags = ScreenAnnotationTagParser.parseExtraTags(from: responseTextWithoutVisuals)
                 let parseResult = Self.parsePointingCoordinates(from: parsedResponseTags.textWithoutExtraTags)
                 let spokenText = parseResult.spokenText
@@ -787,7 +804,7 @@ final class CompanionManager: ObservableObject {
                 // stripped so it doesn't confuse future context)
                 conversationHistory.append((
                     userTranscript: transcript,
-                    assistantResponse: spokenText
+                    assistantResponse: finalBoardText.map { spokenText + "\n" + TeachingBoardParser.summaryForConversationHistory($0) } ?? spokenText
                 ))
 
                 // Keep the last 20 exchanges (40 messages) to bound context growth
@@ -806,8 +823,9 @@ final class CompanionManager: ObservableObject {
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
                 if elevenLabsTTSClient.supportsQueuedSpeech {
-                    // Speak whatever didn't fit into a complete sentence while streaming.
-                    if let remainingSpeech = streamingSpeechSegmenter.takeRemainder(from: fullResponseText) {
+                    // Speak whatever hasn't been said yet: the last partial sentence, plus
+                    // anything Claude wrote after the board.
+                    if let remainingSpeech = streamingSpeechSegmenter.takeRemainder(afterSpeaking: spokenText) {
                         elevenLabsTTSClient.enqueueText(remainingSpeech)
                         voiceState = .responding
                     }
@@ -920,18 +938,38 @@ final class CompanionManager: ObservableObject {
     memory:
     if the user tells you something about themselves that would be useful to remember in future conversations (their name, job, projects, preferences, tools they use), append [REMEMBER:<the fact, written in third person, like "the user's name is alex">]. only remember things they'd want remembered.
 
-    visual explainer cards:
-    when a picture would teach far better than words (how something works, a process or pipeline, a comparison, the structure of an idea, or the parts of a physical object), you can draw an explainer card that pops up on screen next to what you're talking about. at most one per reply, and only when it genuinely helps. your spoken reply must still make sense on its own. write the card after your spoken text, before any drawing or point tags.
+    teaching board (use it almost every time):
+    people understand far better when they can see it written down, so you have a whiteboard that appears on the user's screen and fills in live as you write it. your voice is the short guided version; the board holds the details. make a board for almost every reply:
+    - solving anything (a math problem, a bug, a calculation, a decision, a "how do i..."): the full worked solution, step by step, ending with the answer and a quick check when it makes sense.
+    - explaining or teaching something: the key idea, a small example or diagram, and the takeaway.
+    - a quick factual answer: a tiny board with the answer and one line of why.
+    - only skip the board for a pure "where is it on my screen" question, where pointing and drawing on the screen says it all. when the question is about something on screen, do both: draw on the screen and make the board.
 
-    diagram card format:
-    <visual kind="diagram" title="2-5 word title" x="X" y="Y" width="W" height="H">
-    <svg viewBox="0 0 W H-30" xmlns="http://www.w3.org/2000/svg">...</svg>
-    </visual>
-    - x,y is where the card's top-left corner should go, in screenshot pixel coordinates. pick empty-ish space that doesn't cover what you're explaining or pointing at. width 420-640, height 300-480.
-    - it renders as a hand-drawn whiteboard sketch on grid paper, and elements draw themselves in document order, so order them the way you'd explain out loud.
-    - style: big handwritten text (font-size 20-30, fill #2b2b2b), a bold heading at the top, boxes as rect with rx="3" stroke="#2b2b2b" stroke-width="2" and soft fills (#dbeafe blue, #fde2e2 red, #dcfce7 green, #fef3c7 yellow, #ede9fe purple), arrows as line or path with stroke="#2b2b2b" stroke-width="2" marker-end="url(#arrow)" (that marker already exists), numbered steps as small circles with a number.
-    - keep it simple and roomy: under 30 elements, no tiny text, no gradients, no images, no scripts.
+    board format. write it right after your spoken text, before any drawing or point tags. one item per line, each line starting with a keyword:
+    <board title="short title">
+    step: short heading for this step
+    text: one or two short sentences. use **bold** for the key term and `backticks` for code.
+    math: a displayed equation in latex, like 3(x-1)(x-3) = 0
+    bullet: a short list item
+    note: a tip or a common mistake to avoid
+    ```python
+    code goes in a fenced block like this
+    ```
+    <svg viewBox="0 0 480 200">a small diagram in whiteboard style: strokes #24242a width 2, soft fills (#dbeafe, #fde2e2, #dcfce7, #fef3c7), rounded rect rx="4", arrows with marker-end="url(#arrow)", text font-size 16 to 22, under 20 elements</svg>
+    answer: the final answer, with $inline latex$ if it's math
+    check: a one-line verification
+    </board>
 
+    board rules:
+    - 2 to 6 steps. short lines, one idea each. no line longer than about 25 words.
+    - math goes in math:, answer:, or $...$ inline, always as latex. never write math as plain text like x^2.
+    - for code: show the fix, not the whole file. for a bug: what's wrong, why, the fix.
+    - the board appears line by line as you write, so put things in the order you'd explain them.
+    - follow-ups: the board stays on screen and the user can ask about it ("why step 2?", "do the next one"). answer follow-ups with a new complete board; it replaces the old one.
+    - put all of your spoken words before the board, nothing after it. any suggestion for what to try next goes in that spoken part as one short sentence.
+    - when you make a board, keep your spoken part to one to three short sentences that guide them through it, like a teacher pointing at the board. never read the board out word for word, and don't say "on the board" every time.
+
+    3d models: for physical objects (machines, engines, devices, anatomy), you can also show a draggable 3d model card next to the board.
     3d model card format, for physical objects (machines, engines, devices, anatomy, buildings):
     <visual kind="3d" title="2-5 word title" x="X" y="Y" width="560" height="440">
     javascript
@@ -965,6 +1003,18 @@ final class CompanionManager: ObservableObject {
     /// Speaks complete sentences as they stream in (queued TTS), so OpenClicky starts
     /// answering about a second after the user lets go instead of after the whole reply.
     private func handleStreamedResponseText(_ accumulatedResponseText: String) {
+        // Write on the board as Claude writes it.
+        if let streamingBoardText = TeachingBoardParser.streamingBoardText(in: accumulatedResponseText) {
+            if !hasOpenedBoardForCurrentResponse {
+                hasOpenedBoardForCurrentResponse = true
+                teachingBoardPanelManager.beginNewBoard(
+                    nearScreenPoint: NSEvent.mouseLocation,
+                    preferLeftSide: agentManager.hasAnyAgents
+                )
+            }
+            teachingBoardPanelManager.updateBoard(boardText: streamingBoardText, isComplete: false)
+        }
+
         guard elevenLabsTTSClient.supportsQueuedSpeech else {
             // ElevenLabs plays one clip at a time; fall back to speaking once a visual starts.
             speakEarlyIfVisualHasStarted(accumulatedResponseText)
@@ -1007,6 +1057,7 @@ final class CompanionManager: ObservableObject {
                     || !self.activeScreenAnnotations.isEmpty
                     || !self.userInkStrokes.isEmpty
                     || self.visualExplainerCardManager.hasOpenCards
+                    || self.teachingBoardPanelManager.isShowingBoard
                 guard isOpenClickyBusy else { return }
 
                 print("⎋ Escape: stopping OpenClicky")
@@ -1019,6 +1070,7 @@ final class CompanionManager: ObservableObject {
                 self.claudeAPI.discardPrewarmedProcess()
                 self.clearScreenAnnotations()
                 self.visualExplainerCardManager.closeAllCards()
+                self.teachingBoardPanelManager.closeBoard()
                 self.currentCaptionText = nil
                 self.voiceState = .idle
                 self.scheduleTransientHideIfNeeded()

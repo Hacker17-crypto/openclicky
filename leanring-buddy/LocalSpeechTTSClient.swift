@@ -231,6 +231,9 @@ struct StreamingSpeechSegmenter {
         if let visualStart = responseText.range(of: "<visual", options: .caseInsensitive)?.lowerBound {
             cutIndex = min(cutIndex, visualStart)
         }
+        if let boardStart = responseText.range(of: "<board", options: .caseInsensitive)?.lowerBound {
+            cutIndex = min(cutIndex, boardStart)
+        }
         return String(responseText[..<cutIndex])
     }
 
@@ -267,6 +270,33 @@ struct StreamingSpeechSegmenter {
         consumedCharacterCount = lastSentenceEndOffset
         spokenTextSoFar += newSentencesText
         return newSentencesText
+    }
+
+    /// Once the full reply has arrived: whatever part of the final spoken text (board and tags
+    /// already removed) hasn't been handed to TTS yet. Catches the last partial sentence and
+    /// any words Claude wrote after the board.
+    mutating func takeRemainder(afterSpeaking fullSpokenText: String) -> String? {
+        func collapsedWhitespace(_ text: String) -> String {
+            text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+        let collapsedFullText = collapsedWhitespace(fullSpokenText)
+        let collapsedAlreadySpoken = collapsedWhitespace(spokenTextSoFar)
+
+        let remainderText: String
+        if collapsedAlreadySpoken.isEmpty {
+            remainderText = collapsedFullText
+        } else if collapsedFullText.hasPrefix(collapsedAlreadySpoken) {
+            remainderText = String(collapsedFullText.dropFirst(collapsedAlreadySpoken.count))
+        } else {
+            // Text didn't line up (rare); don't risk repeating what was already said.
+            return nil
+        }
+
+        let trimmedRemainderText = remainderText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRemainderText.isEmpty else { return nil }
+        spokenTextSoFar += " " + trimmedRemainderText
+        consumedCharacterCount = Int.max / 2
+        return trimmedRemainderText
     }
 
     /// Whatever speakable text is left once the full reply has arrived.

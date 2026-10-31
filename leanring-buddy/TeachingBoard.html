@@ -1,0 +1,422 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  OpenClicky teaching board.
+  Claude writes a line-based <board> block (see CompanionManager's prompt); the app streams
+  the text into window.updateBoard(text, isComplete) as it arrives, and new lines appear on
+  the board as they're written. Each line starts with a keyword:
+    step: heading      text: sentence      math: latex      bullet: item
+    note: tip          answer: final       check: verification
+    ```lang ... ```    (code block)        <svg ...>...</svg> (diagram)
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<style>
+  :root {
+    --paper: #fbfaf6;
+    --paper-edge: #ece8dc;
+    --ink: #24242a;
+    --ink-soft: #5b5b66;
+    --grid: rgba(70, 80, 120, 0.055);
+    --hand: "Kalam", "Noteworthy", "Segoe Print", "Comic Sans MS", cursive;
+    --sans: "Inter", -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    --blue: #3b82f6;
+    --green: #16a34a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; font-family: var(--sans); color: var(--ink); -webkit-font-smoothing: antialiased; }
+  body { padding: 10px; }
+
+  .board {
+    position: relative;
+    background-color: var(--paper);
+    background-image: radial-gradient(var(--grid) 1.2px, transparent 1.2px);
+    background-size: 18px 18px;
+    border-radius: 16px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.32), 0 2px 6px rgba(0,0,0,.12), inset 0 0 0 1px rgba(0,0,0,.06);
+    overflow: hidden;
+    animation: boardIn .45s cubic-bezier(.2,.9,.3,1.15) both;
+    transform-origin: 50% 0;
+  }
+  @keyframes boardIn { from { opacity: 0; transform: translateY(-8px) scale(.97); } to { opacity: 1; transform: none; } }
+
+  .board-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px 10px 18px;
+    border-bottom: 1.5px dashed var(--paper-edge);
+    cursor: grab; user-select: none;
+  }
+  .board-title { flex: 1; font-family: var(--hand); font-weight: 700; font-size: 22px; line-height: 1.15; letter-spacing: .2px; }
+  .board-title .underline { display: block; height: 3px; width: 0; margin-top: 2px; border-radius: 3px; background: #f6c94c; transition: width .7s cubic-bezier(.3,.8,.3,1); }
+  .board-title.written .underline { width: 64px; }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 0 rgba(59,130,246,.5); animation: pulse 1.4s infinite; }
+  .live-dot.done { background: var(--green); animation: none; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(59,130,246,.45);} 70% { box-shadow: 0 0 0 8px rgba(59,130,246,0);} 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0);} }
+  .close { width: 24px; height: 24px; border-radius: 12px; border: 0; background: rgba(0,0,0,.06); color: #666; font: 600 14px var(--sans); cursor: pointer; }
+  .close:hover { background: rgba(0,0,0,.13); color: #222; }
+
+  .board-body { padding: 14px 18px 6px 18px; max-height: calc(100vh - 120px); overflow-y: auto; scroll-behavior: smooth; }
+  .board-body::-webkit-scrollbar { width: 8px; } .board-body::-webkit-scrollbar-thumb { background: rgba(0,0,0,.12); border-radius: 4px; }
+
+  .step { display: grid; grid-template-columns: 30px 1fr; column-gap: 12px; margin-bottom: 14px; }
+  .step-number {
+    width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+    font-family: var(--hand); font-weight: 700; font-size: 16px; color: #1d1d22;
+    background: var(--step-fill); border: 2px solid var(--step-edge);
+    animation: pop .38s cubic-bezier(.3,1.6,.5,1) both; margin-top: 1px;
+  }
+  @keyframes pop { from { transform: scale(.2) rotate(-20deg); opacity: 0; } to { transform: none; opacity: 1; } }
+  .step-content { min-width: 0; }
+  .step-heading { font-family: var(--hand); font-weight: 700; font-size: 19px; line-height: 1.25; margin: 2px 0 4px; }
+
+  .line { animation: writeIn .42s ease-out both; }
+  @keyframes writeIn { from { opacity: 0; transform: translateY(4px); clip-path: inset(0 100% 0 0); } to { opacity: 1; transform: none; clip-path: inset(0 0 0 0); } }
+
+  .text { font-size: 14.5px; line-height: 1.55; color: var(--ink); margin: 3px 0; }
+  .text b, .text strong { font-weight: 600; background: linear-gradient(transparent 60%, rgba(246,201,76,.55) 60%); padding: 0 1px; }
+  code.inline { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; background: rgba(36,36,42,.07); padding: 1px 5px; border-radius: 5px; }
+
+  .math { margin: 7px 0; padding: 8px 12px; background: rgba(255,255,255,.75); border: 1px solid rgba(0,0,0,.06); border-radius: 10px; overflow-x: auto; text-align: center; font-size: 15.5px; }
+  .math .katex-display { margin: 0; }
+
+  ul.bullets { margin: 4px 0; padding: 0; list-style: none; }
+  ul.bullets li { position: relative; padding-left: 18px; font-size: 14.5px; line-height: 1.5; margin: 3px 0; }
+  ul.bullets li::before { content: ""; position: absolute; left: 3px; top: .58em; width: 7px; height: 7px; border-radius: 50%; background: var(--dot, #f2a65a); }
+
+  .note { margin: 8px 0; padding: 8px 12px 8px 12px; background: #fff3b8; border-left: 4px solid #f2c94c; border-radius: 4px 10px 10px 4px; font-size: 13.5px; line-height: 1.45; transform: rotate(-.4deg); box-shadow: 0 2px 5px rgba(0,0,0,.08); }
+  .note::before { content: "Tip "; font-family: var(--hand); font-weight: 700; color: #a3781a; }
+
+  pre.code { margin: 7px 0; padding: 10px 12px; background: #1f2128; color: #e6e6e6; border-radius: 10px; overflow-x: auto; font: 12.5px/1.5 "SF Mono", Menlo, Consolas, monospace; }
+  pre.code .lang { display: block; font: 600 10px var(--sans); color: #8a8fa0; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 4px; }
+  .tok-k { color: #c792ea; } .tok-s { color: #c3e88d; } .tok-c { color: #6b7280; font-style: italic; } .tok-n { color: #f78c6c; } .tok-f { color: #82aaff; }
+
+  .diagram { margin: 8px 0; padding: 6px; background: rgba(255,255,255,.6); border: 1px solid rgba(0,0,0,.06); border-radius: 10px; }
+  .diagram svg { width: 100%; height: auto; display: block; }
+  .diagram svg text { font-family: var(--hand); }
+
+  .answer { margin: 12px 0 8px; padding: 12px 14px; border: 2.5px solid var(--green); border-radius: 12px; background: rgba(22,163,74,.06); position: relative; animation: answerIn .55s cubic-bezier(.2,1.4,.4,1) both; }
+  @keyframes answerIn { from { opacity: 0; transform: scale(.94) rotate(-1deg); } to { opacity: 1; transform: none; } }
+  .answer-label { position: absolute; top: -12px; left: 12px; background: var(--paper); padding: 0 6px; font-family: var(--hand); font-weight: 700; font-size: 15px; color: var(--green); }
+  .answer-body { font-size: 17px; font-weight: 600; line-height: 1.4; }
+  .answer-body .katex { font-size: 1.12em; }
+  .check { margin: 6px 0; font-size: 13.5px; color: #3c6e47; display: flex; gap: 8px; align-items: baseline; }
+  .check::before { content: "✓"; font-weight: 700; color: var(--green); }
+
+  .board-footer { display: flex; align-items: center; gap: 8px; padding: 9px 18px 12px; font-size: 11.5px; color: #8b8b93; border-top: 1.5px dashed var(--paper-edge); }
+  .key { font: 600 10.5px var(--sans); color: #55555d; background: #fff; border: 1px solid #ddd; border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; }
+  .writing-cursor { display: inline-block; width: 7px; height: 7px; margin-left: 4px; border-radius: 50%; background: var(--blue); animation: blink 1s infinite; vertical-align: middle; }
+  @keyframes blink { 50% { opacity: .2; } }
+</style>
+</head>
+<body>
+<div class="board" id="board">
+  <div class="board-header">
+    <div class="live-dot" id="liveDot"></div>
+    <div class="board-title" id="boardTitle">…<span class="underline"></span></div>
+    <button class="close" title="Close (Esc)" onclick="closeBoard()">×</button>
+  </div>
+  <div class="board-body" id="boardBody"></div>
+  <div class="board-footer" id="boardFooter">
+    <span id="footerText">writing</span><span class="writing-cursor" id="writingCursor"></span>
+  </div>
+</div>
+
+<script>
+const boardBody = document.getElementById('boardBody');
+const boardTitle = document.getElementById('boardTitle');
+const stepPalette = [
+  ['#dbeafe', '#3b82f6', '#60a5fa'], ['#dcfce7', '#16a34a', '#4ade80'], ['#fde2e2', '#e05656', '#f87171'],
+  ['#fef3c7', '#d99a1e', '#f59e0b'], ['#ede9fe', '#7c5cdb', '#a78bfa'], ['#e0f2fe', '#0284c7', '#38bdf8']
+];
+
+let renderedBlockCount = 0;
+let currentStepContent = null;
+let stepCount = 0;
+let currentBulletList = null;
+let hasFinished = false;
+
+function postToApp(message) {
+  try { window.webkit.messageHandlers.openclicky.postMessage(message); } catch (e) {}
+}
+function closeBoard() { postToApp('close'); }
+
+function escapeHtml(text) {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// **bold**, `code`, and $inline latex$ inside a line of text.
+// A $...$ span is math only if it looks like math (has \ ^ _ = { } or is a short symbol
+// like $P$); otherwise the dollar signs are money ("$1000 becomes about $1157.63").
+function looksLikeLatex(content) {
+  return /[\\^_={}]/.test(content) || /^\s*[A-Za-z0-9]{1,3}\s*$/.test(content) || /^[\d\s+\-*/().,]+$/.test(content) && /[+\-*/]/.test(content);
+}
+function renderInline(text) {
+  const mathPieces = [];
+  let working = text.replace(/\$([^$\n]+)\$/g, (match, latex) => {
+    if (!looksLikeLatex(latex)) return match;
+    mathPieces.push(latex);
+    return `\u0000${mathPieces.length - 1}\u0000`;
+  });
+  working = escapeHtml(working)
+    .replace(/`([^`]+)`/g, '<code class="inline">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  return working.replace(/\u0000(\d+)\u0000/g, (_, index) => renderLatex(mathPieces[+index], false));
+}
+
+function renderLatex(latex, isDisplay) {
+  try {
+    if (window.katex) return katex.renderToString(latex, { displayMode: isDisplay, throwOnError: false, strict: 'ignore' });
+  } catch (e) {}
+  return `<code class="inline">${escapeHtml(latex)}</code>`;
+}
+
+// Minimal syntax colouring in one pass (so later rules never touch earlier markup):
+// comments, strings, keywords, numbers, function calls.
+const codeKeywords = new Set(('def return if elif else for while in import from as class try except finally with lambda yield ' +
+  'const let var function new this async await public private static void int float double bool true false True False None null ' +
+  'undefined fn struct enum match impl use func guard switch case break continue select from where join group by order and or not').split(' '));
+function highlightCode(code, language) {
+  const isHashComment = /^(py|python|sh|bash|shell|zsh|ruby|rb|r|yaml|yml|toml)$/i.test(language || '');
+  const tokenPattern = isHashComment
+    ? /(#.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\b([A-Za-z_]\w*)(?=\()|\b([A-Za-z_]\w*)\b|\b(\d+(?:\.\d+)?)\b/g
+    : /(\/\/.*$|--.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b([A-Za-z_]\w*)(?=\()|\b([A-Za-z_]\w*)\b|\b(\d+(?:\.\d+)?)\b/g;
+  return code.split('\n').map(line => {
+    let html = '';
+    let lastIndex = 0;
+    line.replace(tokenPattern, (match, comment, string, functionName, word, number, offset) => {
+      html += escapeHtml(line.slice(lastIndex, offset));
+      if (comment) html += `<span class="tok-c">${escapeHtml(comment)}</span>`;
+      else if (string) html += `<span class="tok-s">${escapeHtml(string)}</span>`;
+      else if (functionName) html += codeKeywords.has(functionName) ? `<span class="tok-k">${functionName}</span>` : `<span class="tok-f">${functionName}</span>`;
+      else if (word) html += codeKeywords.has(word) || codeKeywords.has(word.toLowerCase()) && /^[A-Z]+$/.test(word) ? `<span class="tok-k">${word}</span>` : escapeHtml(word);
+      else if (number) html += `<span class="tok-n">${number}</span>`;
+      lastIndex = offset + match.length;
+      return match;
+    });
+    return html + escapeHtml(line.slice(lastIndex));
+  }).join('\n');
+}
+
+function ensureStep() {
+  if (!currentStepContent) startStep('');
+  return currentStepContent;
+}
+
+function startStep(headingText) {
+  stepCount += 1;
+  const [fill, edge, dot] = stepPalette[(stepCount - 1) % stepPalette.length];
+  const stepElement = document.createElement('div');
+  stepElement.className = 'step';
+  stepElement.style.setProperty('--step-fill', fill);
+  stepElement.style.setProperty('--step-edge', edge);
+  stepElement.style.setProperty('--dot', dot);
+  stepElement.innerHTML = `<div class="step-number">${stepCount}</div><div class="step-content"></div>`;
+  boardBody.appendChild(stepElement);
+  currentStepContent = stepElement.querySelector('.step-content');
+  currentBulletList = null;
+  if (headingText) appendLine(currentStepContent, 'div', 'step-heading', renderInline(headingText));
+}
+
+function appendLine(parent, tagName, className, innerHtml) {
+  const element = document.createElement(tagName);
+  element.className = className + ' line';
+  element.innerHTML = innerHtml;
+  parent.appendChild(element);
+  boardBody.scrollTop = boardBody.scrollHeight;
+  return element;
+}
+
+// Splits the board text into blocks: single keyword lines, ``` code blocks and <svg> diagrams.
+function parseBlocks(boardText, isComplete) {
+  const lines = boardText.split('\n');
+  if (!isComplete) lines.pop(); // the last line may still be streaming in
+  const blocks = [];
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('```')) {
+      const language = trimmed.slice(3).trim();
+      const codeLines = [];
+      let closed = false;
+      for (lineIndex += 1; lineIndex < lines.length; lineIndex++) {
+        if (lines[lineIndex].trim().startsWith('```')) { closed = true; break; }
+        codeLines.push(lines[lineIndex]);
+      }
+      if (!closed && !isComplete) break; // wait for the rest of the code block
+      blocks.push({ kind: 'code', language, value: codeLines.join('\n') });
+      continue;
+    }
+    if (trimmed.startsWith('<svg') || /^diagram:\s*<svg/.test(trimmed)) {
+      const svgLines = [trimmed.replace(/^diagram:\s*/, '')];
+      let closed = trimmed.includes('</svg>');
+      while (!closed && lineIndex + 1 < lines.length) {
+        lineIndex += 1;
+        svgLines.push(lines[lineIndex]);
+        closed = lines[lineIndex].includes('</svg>');
+      }
+      if (!closed && !isComplete) break;
+      blocks.push({ kind: 'diagram', value: svgLines.join('\n') });
+      continue;
+    }
+    if (/^diagram:\s*$/.test(trimmed)) continue;
+    const keywordMatch = trimmed.match(/^(step|text|math|bullet|note|answer|check|code)\s*:\s*(.*)$/i);
+    if (keywordMatch) {
+      blocks.push({ kind: keywordMatch[1].toLowerCase(), value: keywordMatch[2] });
+    } else if (/^[-*•]\s+/.test(trimmed)) {
+      blocks.push({ kind: 'bullet', value: trimmed.replace(/^[-*•]\s+/, '') });
+    } else if (/^\d+[.)]\s+/.test(trimmed)) {
+      blocks.push({ kind: 'step', value: trimmed.replace(/^\d+[.)]\s+/, '') });
+    } else {
+      blocks.push({ kind: 'text', value: trimmed });
+    }
+  }
+  return blocks;
+}
+
+function renderBlock(block) {
+  switch (block.kind) {
+    case 'step':
+      startStep(block.value);
+      break;
+    case 'text':
+      currentBulletList = null;
+      appendLine(ensureStep(), 'div', 'text', renderInline(block.value));
+      break;
+    case 'math':
+      currentBulletList = null;
+      appendLine(ensureStep(), 'div', 'math', renderLatex(block.value.replace(/^\$+|\$+$/g, ''), true));
+      break;
+    case 'bullet': {
+      const stepContent = ensureStep();
+      if (!currentBulletList) {
+        currentBulletList = document.createElement('ul');
+        currentBulletList.className = 'bullets';
+        stepContent.appendChild(currentBulletList);
+      }
+      appendLine(currentBulletList, 'li', '', renderInline(block.value));
+      break;
+    }
+    case 'note':
+      currentBulletList = null;
+      appendLine(ensureStep(), 'div', 'note', renderInline(block.value));
+      break;
+    case 'code':
+      currentBulletList = null;
+      appendLine(ensureStep(), 'pre', 'code', (block.language ? `<span class="lang">${escapeHtml(block.language)}</span>` : '') + highlightCode(block.value, block.language));
+      break;
+    case 'diagram': {
+      currentBulletList = null;
+      const diagram = appendLine(ensureStep(), 'div', 'diagram', block.value.includes('<script') ? '' : block.value);
+      animateDiagram(diagram.querySelector('svg'));
+      break;
+    }
+    case 'answer':
+      currentBulletList = null;
+      appendLine(boardBody, 'div', 'answer', `<span class="answer-label">Answer</span><div class="answer-body">${renderInline(block.value)}</div>`);
+      currentStepContent = null;
+      break;
+    case 'check':
+      appendLine(boardBody, 'div', 'check', renderInline(block.value));
+      break;
+  }
+}
+
+// Strokes trace themselves in, fills and labels fade in, in document order.
+function animateDiagram(svg) {
+  if (!svg) return;
+  if (!svg.getAttribute('viewBox') && svg.getAttribute('width')) {
+    svg.setAttribute('viewBox', `0 0 ${parseFloat(svg.getAttribute('width'))} ${parseFloat(svg.getAttribute('height') || 200)}`);
+  }
+  svg.removeAttribute('width'); svg.removeAttribute('height');
+  // Crop the viewBox to what's actually drawn, so diagrams don't carry empty space.
+  try {
+    const drawnBounds = svg.getBBox();
+    if (drawnBounds.width > 20 && drawnBounds.height > 20) {
+      const padding = 12;
+      svg.setAttribute('viewBox', `${drawnBounds.x - padding} ${drawnBounds.y - padding} ${drawnBounds.width + padding * 2} ${drawnBounds.height + padding * 2}`);
+      svg.style.maxHeight = Math.min(300, (drawnBounds.height + padding * 2) * 1.2) + 'px';
+    }
+  } catch (e) {}
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  defs.innerHTML = '<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#24242a"/></marker>';
+  svg.insertBefore(defs, svg.firstChild);
+  let delay = 60;
+  svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text').forEach(element => {
+    if (element.closest('defs')) return;
+    const isText = element.tagName.toLowerCase() === 'text';
+    element.style.opacity = '0';
+    setTimeout(() => {
+      element.style.transition = 'opacity .25s ease';
+      element.style.opacity = '1';
+      if (!isText && element.getTotalLength) {
+        try {
+          const length = element.getTotalLength();
+          if (length > 0) {
+            element.style.strokeDasharray = length;
+            element.style.strokeDashoffset = length;
+            element.getBoundingClientRect();
+            element.style.transition = 'stroke-dashoffset .45s ease-out, opacity .2s';
+            element.style.strokeDashoffset = '0';
+          }
+        } catch (e) {}
+      }
+    }, delay);
+    delay += isText ? 90 : 120;
+  });
+}
+
+// Called by the app with the whole board text so far (title attribute included).
+window.updateBoard = function (boardText, isComplete) {
+  const titleMatch = boardText.match(/<board[^>]*title\s*=\s*["']([^"']*)["']/i);
+  if (titleMatch && boardTitle.firstChild.textContent !== titleMatch[1]) {
+    boardTitle.firstChild.textContent = titleMatch[1];
+    requestAnimationFrame(() => boardTitle.classList.add('written'));
+  }
+  const bodyText = boardText.replace(/^[\s\S]*?<board[^>]*>/i, '').replace(/<\/board>[\s\S]*$/i, '');
+  const blocks = parseBlocks(bodyText, isComplete);
+  for (let blockIndex = renderedBlockCount; blockIndex < blocks.length; blockIndex++) renderBlock(blocks[blockIndex]);
+  renderedBlockCount = Math.max(renderedBlockCount, blocks.length);
+  if (isComplete && !hasFinished) finishBoard();
+  postToApp('height:' + document.getElementById('board').getBoundingClientRect().height);
+};
+
+function finishBoard() {
+  hasFinished = true;
+  document.getElementById('liveDot').classList.add('done');
+  document.getElementById('writingCursor').remove();
+  const shortcutKeys = window.followUpShortcutKeys || ['control', 'option'];
+  document.getElementById('footerText').innerHTML = 'Hold ' + shortcutKeys.map(key => `<span class="key">${escapeHtml(key)}</span>`).join(' + ') + ' to ask a follow-up';
+}
+
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeBoard(); });
+
+// Drag the board by its header (the app moves the window by the reported deltas).
+(function enableHeaderDragging() {
+  const header = document.querySelector('.board-header');
+  let lastPointer = null;
+  header.addEventListener('mousedown', event => {
+    if (event.target.closest('.close')) return;
+    lastPointer = { x: event.screenX, y: event.screenY };
+    header.style.cursor = 'grabbing';
+    event.preventDefault();
+  });
+  window.addEventListener('mousemove', event => {
+    if (!lastPointer) return;
+    postToApp(`drag:${event.screenX - lastPointer.x},${event.screenY - lastPointer.y}`);
+    lastPointer = { x: event.screenX, y: event.screenY };
+  });
+  window.addEventListener('mouseup', () => { lastPointer = null; header.style.cursor = 'grab'; });
+})();
+
+// The footer names the platform's talk shortcut.
+window.setFollowUpShortcut = function (keyNames) {
+  window.followUpShortcutKeys = keyNames;
+};
+</script>
+</body>
+</html>

@@ -103,8 +103,10 @@ enum VisualExplainerParser {
     /// The speakable text before a visual starts streaming, or nil if no visual has begun yet.
     /// Lets OpenClicky start talking while the diagram is still being generated.
     static func spokenPrefixBeforeVisual(in partialResponseText: String) -> String? {
-        guard let visualStart = partialResponseText.range(of: "<visual", options: .caseInsensitive) else { return nil }
-        return String(partialResponseText[..<visualStart.lowerBound])
+        let visualStart = partialResponseText.range(of: "<visual", options: .caseInsensitive)?.lowerBound
+        let boardStart = partialResponseText.range(of: "<board", options: .caseInsensitive)?.lowerBound
+        guard let firstBlockStart = [visualStart, boardStart].compactMap({ $0 }).min() else { return nil }
+        return String(partialResponseText[..<firstBlockStart])
     }
 
     private static func parseAttributes(_ attributeText: String) -> [String: String] {
