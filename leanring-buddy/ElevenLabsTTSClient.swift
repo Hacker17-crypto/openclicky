@@ -70,6 +70,9 @@ final class ElevenLabsTTSClient: CompanionTextToSpeechClient {
 
         let player = try AVAudioPlayer(data: data)
         self.audioPlayer = player
+        // Apply the 0.5x–1.5x speed setting (enableRate must be set before play()).
+        player.enableRate = true
+        player.rate = Float(OpenClickySettings.shared.speechRateMultiplier)
         player.play()
         print("🔊 ElevenLabs TTS: playing \(data.count / 1024)KB audio")
     }

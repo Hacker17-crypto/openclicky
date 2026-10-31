@@ -52,15 +52,42 @@ final class LocalSpeechTTSClient: NSObject, CompanionTextToSpeechClient {
     static let voiceIdentifierOverrideDefaultsKey = "LocalSpeechVoiceIdentifier"
 
     private let speechSynthesizer = AVSpeechSynthesizer()
-    private let selectedVoice: AVSpeechSynthesisVoice?
 
-    override init() {
-        self.selectedVoice = Self.pickBestAvailableVoice()
-        super.init()
+    /// Re-resolved on every utterance so voice changes in Settings apply immediately.
+    private var selectedVoice: AVSpeechSynthesisVoice? {
+        Self.pickBestAvailableVoice()
     }
 
     var voiceDisplayName: String {
         selectedVoice?.name ?? "system default"
+    }
+
+    /// Normal rate scaled by the user's 0.5x–1.5x speed setting.
+    private static var userAdjustedSpeechRate: Float {
+        let speechRateMultiplier = Float(OpenClickySettings.shared.speechRateMultiplier)
+        let adjustedSpeechRate = AVSpeechUtteranceDefaultSpeechRate * speechRateMultiplier
+        return min(max(adjustedSpeechRate, AVSpeechUtteranceMinimumSpeechRate), AVSpeechUtteranceMaximumSpeechRate)
+    }
+
+    /// English voices installed on this Mac, best quality first, for the Settings picker.
+    static func installedEnglishVoices() -> [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.hasPrefix("en") && !$0.voiceTraits.contains(.isNoveltyVoice) }
+            .sorted { firstVoice, secondVoice in
+                if firstVoice.quality.rawValue != secondVoice.quality.rawValue {
+                    return firstVoice.quality.rawValue > secondVoice.quality.rawValue
+                }
+                return firstVoice.name < secondVoice.name
+            }
+    }
+
+    /// Speaks a short sample with a specific voice so the user can compare voices in Settings.
+    func previewVoice(identifier voiceIdentifier: String) {
+        stopPlayback()
+        let previewUtterance = AVSpeechUtterance(string: "hey, i'm openclicky. this is how i sound.")
+        previewUtterance.voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) ?? selectedVoice
+        previewUtterance.rate = Self.userAdjustedSpeechRate
+        speechSynthesizer.speak(previewUtterance)
     }
 
     func speakText(_ text: String) async throws {
@@ -72,7 +99,7 @@ final class LocalSpeechTTSClient: NSObject, CompanionTextToSpeechClient {
 
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        utterance.rate = Self.userAdjustedSpeechRate
         speechSynthesizer.speak(utterance)
 
         // speak() is asynchronous. Wait briefly until audio is actually playing so
@@ -94,6 +121,7 @@ final class LocalSpeechTTSClient: NSObject, CompanionTextToSpeechClient {
 
     private static func pickBestAvailableVoice() -> AVSpeechSynthesisVoice? {
         if let overrideVoiceIdentifier = UserDefaults.standard.string(forKey: voiceIdentifierOverrideDefaultsKey),
+           !overrideVoiceIdentifier.isEmpty,
            let overrideVoice = AVSpeechSynthesisVoice(identifier: overrideVoiceIdentifier) {
             return overrideVoice
         }

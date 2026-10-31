@@ -43,6 +43,16 @@ claude --print --input-format stream-json --output-format stream-json --verbose 
 
 Optional Info.plist keys (blank by default): `AssemblyAIAPIKey`, `OpenAIAPIKey`, `ElevenLabsAPIKey`, `ElevenLabsVoiceID`, `VoiceTranscriptionProvider` (`apple`|`assemblyai`|`openai`).
 
+### OpenClicky Features (beyond upstream Clicky)
+
+Talk replies can carry extra tags, parsed in this order: `<visual>` blocks (VisualExplainerParser, first because they contain brackets) → `[AGENT:]`, `[REMEMBER:]`, `[CIRCLE:]`, `[HIGHLIGHT:]`, `[UNDERLINE:]`, `[ARROW:]`, `[LABEL:]`, `[NOTE:]` (ScreenAnnotationTagParser) → `[POINT:]` (CompanionManager.parsePointingCoordinates). The prompt describing them is `companionCapabilitiesSystemPromptExtension` in CompanionManager. It was verified against Claude Code, so change the tag formats and the parsers together.
+
+- **Agents**: `[AGENT:task]` or a transcript starting with "agent, ..." launches a long-lived `claude` process (`--permission-prompt-tool stdio`, stream-json in/out, stdin kept open for follow-ups) in `~/OpenClicky/<date> <name>/`. `can_use_tool` control requests become approval cards unless the mode is Always approve or the tool is always-allowed. The process exits when the card is dismissed.
+- **Drawing**: annotations are stored in global AppKit coordinates in `CompanionManager.activeScreenAnnotations` and rendered per screen by `ScreenAnnotationLayerView` inside BlueCursorView. They clear 5 seconds after TTS ends or on the next press.
+- **Visual cards**: one WKWebView NSPanel at a time. Diagrams are SVG with a stroke-draw animation; 3D is a three.js r160 script (CDN importmap) run via `new Function` with helpers (material, addPart, addLabel, addArrow). TTS starts as soon as `<visual` appears in the stream (`speakEarlyIfVisualHasStarted`).
+- **Dictation**: Fn+Control (without Option) is detected in GlobalPushToTalkShortcutMonitor, handled by OpenClickyDictationController (hold, double-tap hands-free, Claude polish, "draft ..." screen-aware writing), and inserted with pasteboard + Cmd+V (FocusedAppTextInserter), restoring the clipboard afterwards.
+- **Memory/settings**: OpenClickySettings (UserDefaults), OpenClickyMemoryStore (`PROFILE.md` + `conversation.json` in Application Support, 20 exchanges), Settings window from the panel footer.
+
 ### Key Architecture Decisions
 
 **Menu Bar Panel Pattern**: The companion panel uses `NSStatusItem` for the menu bar icon and a custom borderless `NSPanel` for the floating control panel. This gives full control over appearance (dark, rounded corners, custom shadow) and avoids the standard macOS menu/popover chrome. The panel is non-activating so it doesn't steal focus. A global event monitor auto-dismisses it on outside clicks.
@@ -77,6 +87,13 @@ Optional Info.plist keys (blank by default): `AssemblyAIAPIKey`, `OpenAIAPIKey`,
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeCodeCLIClient.swift` | ~520 | Claude via the local Claude Code CLI. Locates `claude` + PATH, builds the stream-json message (history, screenshots, transcript), streams text deltas, maps CLI errors (not installed / not logged in / failed), terminates on cancellation. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
+| `OpenClickyAgents.swift` | ~560 | Agent process (stdio permission protocol), OpenClickyAgent state machine (countdown → working → needs approval → finished/failed), OpenClickyAgentManager. |
+| `AgentCardsPanel.swift` | ~330 | Top-right floating NSPanel with an agent card per agent (approve/stop/retry/reply/open folder). |
+| `ScreenAnnotations.swift` | ~560 | Tag parser for drawing/agent/memory tags, screenshot→screen coordinate conversion, hand-drawn circle/arrow/highlight/underline, callout labels, sticky notes. |
+| `VisualExplainerCards.swift` | ~470 | `<visual>` parser + WKWebView card panels: SVG whiteboard diagrams and three.js 3D models. |
+| `OpenClickyDictationController.swift` | ~270 | Fn+Control dictation, hands-free double-tap, Claude polish, screen-aware drafting, FocusedAppTextInserter. |
+| `OpenClickySettings.swift` | ~210 | User preferences + OpenClickyMemoryStore (PROFILE.md, persisted conversation). |
+| `OpenClickySettingsWindow.swift` | ~260 | Settings window (voice, dictation, agents, memory, shortcuts). |
 | `ElevenLabsTTSClient.swift` | ~87 | Optional ElevenLabs TTS client using the user's own key directly. Plays audio via `AVAudioPlayer`. |
 | `LocalSpeechTTSClient.swift` | ~165 | `CompanionTextToSpeechClient` protocol, default macOS `AVSpeechSynthesizer` client, ElevenLabs→macOS fallback wrapper, and factory. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |

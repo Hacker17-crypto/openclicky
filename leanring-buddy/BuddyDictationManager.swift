@@ -650,9 +650,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     private func buildTranscriptionKeyterms() -> [String] {
-        let baseKeyterms = [
-            "makesomething",
-            "Learning Buddy",
+        let baseKeyterms = OpenClickySettings.shared.personalDictionaryWords + [
+            "OpenClicky",
+            "Claude Code",
             "Codex",
             "Claude",
             "Anthropic",

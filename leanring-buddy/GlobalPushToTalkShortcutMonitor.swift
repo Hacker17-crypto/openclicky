@@ -14,6 +14,10 @@ import Foundation
 
 final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
+    /// Fn + Control (without Option): dictate into the focused app.
+    let dictationShortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
+    /// Tracks the dictation chord separately from the talk chord.
+    private var isDictationShortcutCurrentlyPressed = false
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
@@ -85,6 +89,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
     func stop() {
         isShortcutCurrentlyPressed = false
+        isDictationShortcutCurrentlyPressed = false
 
         if let globalEventTapRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
@@ -94,6 +99,26 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         if let globalEventTap {
             CFMachPortInvalidate(globalEventTap)
             self.globalEventTap = nil
+        }
+    }
+
+    /// Fn + Control held together (and Option not held, so it never collides with
+    /// the Control + Option talk shortcut) means "dictate".
+    private func handleDictationShortcut(eventType: CGEventType, modifierFlagsRawValue: UInt64) {
+        guard eventType == .flagsChanged else { return }
+
+        let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(modifierFlagsRawValue))
+            .intersection(.deviceIndependentFlagsMask)
+        let isDictationChordHeld = modifierFlags.contains(.function)
+            && modifierFlags.contains(.control)
+            && !modifierFlags.contains(.option)
+
+        if isDictationChordHeld && !isDictationShortcutCurrentlyPressed {
+            isDictationShortcutCurrentlyPressed = true
+            dictationShortcutTransitionPublisher.send(.pressed)
+        } else if !isDictationChordHeld && isDictationShortcutCurrentlyPressed {
+            isDictationShortcutCurrentlyPressed = false
+            dictationShortcutTransitionPublisher.send(.released)
         }
     }
 
@@ -126,6 +151,8 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             isShortcutCurrentlyPressed = false
             shortcutTransitionPublisher.send(.released)
         }
+
+        handleDictationShortcut(eventType: eventType, modifierFlagsRawValue: event.flags.rawValue)
 
         return Unmanaged.passUnretained(event)
     }

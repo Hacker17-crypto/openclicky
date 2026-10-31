@@ -78,13 +78,54 @@ final class CompanionManager: ObservableObject {
         return CompanionTextToSpeechClientFactory.makeDefaultClient()
     }()
 
+    /// Background Claude Code agents launched by voice, and their on-screen cards.
+    let agentManager = OpenClickyAgentManager()
+    private lazy var agentCardsPanelManager = AgentCardsPanelManager(agentManager: agentManager)
+
+    /// Fn + Control dictation into the focused app.
+    private lazy var dictationController = OpenClickyDictationController(
+        buddyDictationManager: buddyDictationManager,
+        setProcessingIndicatorVisible: { [weak self] isVisible in
+            guard let self else { return }
+            if isVisible {
+                self.voiceState = .processing
+            } else if self.voiceState == .processing {
+                self.voiceState = .idle
+            }
+        }
+    )
+    private var dictationShortcutTransitionCancellable: AnyCancellable?
+
+    /// Whiteboard diagrams and 3D models Claude draws on screen.
+    private let visualExplainerCardManager = VisualExplainerCardManager()
+
+    /// Shows the spoken words next to the cursor while OpenClicky talks.
+    private let captionsOverlayManager = CompanionResponseOverlayManager()
+
+    /// Circles, arrows, highlights, callout labels and sticky notes currently drawn on screen.
+    /// Rendered by ScreenAnnotationLayerView inside each screen's overlay window.
+    @Published private(set) var activeScreenAnnotations: [ScreenAnnotation] = []
+    private var screenAnnotationClearTask: Task<Void, Never>?
+
+    /// Text already handed to TTS while a visual was still streaming in, so the
+    /// reply isn't spoken twice when the full response arrives.
+    private var earlySpokenResponseText: String?
+
     /// nil until checked on launch. False means `claude` couldn't be found,
     /// and the panel shows setup instructions.
     @Published private(set) var isClaudeCodeCLIInstalled: Bool?
 
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
-    private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
+    /// Persisted to disk (see OpenClickyMemoryStore) when memory is on, so it survives restarts.
+    private var conversationHistory: [(userTranscript: String, assistantResponse: String)] =
+        OpenClickySettings.shared.isMemoryEnabled ? OpenClickyMemoryStore.loadConversationHistory() : []
+
+    /// Forgets the conversation (in memory and on disk). PROFILE.md is kept.
+    func clearConversationHistory() {
+        conversationHistory.removeAll()
+        OpenClickyMemoryStore.clearConversationHistory()
+    }
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -166,6 +207,8 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        bindDictationShortcutTransitions()
+        bindAgentNotifications()
         // Locate the `claude` binary (and the user's login-shell PATH) up front
         // so the first push-to-talk doesn't pay for the lookup.
         ClaudeCodeCLIClient.warmUpInstallationLookupInBackground()
@@ -286,6 +329,9 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        agentManager.shutDownAllAgents()
+        visualExplainerCardManager.closeAllCards()
+        dictationShortcutTransitionCancellable?.cancel()
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
@@ -465,6 +511,9 @@ final class CompanionManager: ObservableObject {
         switch transition {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
+            guard !dictationController.isBusy else { return }
+            clearScreenAnnotations()
+            captionsOverlayManager.hideOverlay()
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
@@ -577,6 +626,13 @@ final class CompanionManager: ObservableObject {
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
+        earlySpokenResponseText = nil
+
+        // "agent, ..." skips the conversation and goes straight to an agent.
+        if let explicitAgentTask = Self.explicitAgentTask(fromTranscript: transcript) {
+            launchAgentFromVoice(taskDescription: explicitAgentTask)
+            return
+        }
 
         currentResponseTask = Task {
             // Stay in processing (spinner) state — no streaming text displayed
@@ -603,19 +659,44 @@ final class CompanionManager: ObservableObject {
 
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                    systemPrompt: makeVoiceResponseSystemPrompt(),
                     conversationHistory: historyForAPI,
                     userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
+                    onTextChunk: { [weak self] accumulatedResponseText in
+                        // Spinner stays until TTS plays. If Claude starts drawing a
+                        // visual, speak the explanation now instead of waiting for it.
+                        self?.speakEarlyIfVisualHasStarted(accumulatedResponseText)
                     }
                 )
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                // Pull out visuals first (they can contain brackets), then the
+                // drawing/agent/memory tags, then the [POINT:...] tag.
+                let (responseTextWithoutVisuals, visualRequests) = VisualExplainerParser.extractVisuals(from: fullResponseText)
+                let parsedResponseTags = ScreenAnnotationTagParser.parseExtraTags(from: responseTextWithoutVisuals)
+                let parseResult = Self.parsePointingCoordinates(from: parsedResponseTags.textWithoutExtraTags)
                 let spokenText = parseResult.spokenText
+
+                for factToRemember in parsedResponseTags.factsToRemember where OpenClickySettings.shared.isMemoryEnabled {
+                    OpenClickyMemoryStore.rememberFact(factToRemember)
+                }
+
+                for agentTaskDescription in parsedResponseTags.agentTaskDescriptions {
+                    agentManager.launchAgent(taskDescription: agentTaskDescription, screenshotImages: labeledImages)
+                }
+
+                if let firstVisualRequest = visualRequests.first {
+                    visualExplainerCardManager.showVisual(firstVisualRequest, screenCaptures: screenCaptures)
+                }
+
+                let newScreenAnnotations = ScreenAnnotationFactory.makeAnnotations(
+                    from: parsedResponseTags.drawingRequests,
+                    screenCaptures: screenCaptures
+                )
+                if !newScreenAnnotations.isEmpty {
+                    showScreenAnnotations(newScreenAnnotations)
+                }
 
                 // Handle element pointing if Claude returned coordinates.
                 // Switch to idle BEFORE setting the location so the triangle
@@ -679,9 +760,13 @@ final class CompanionManager: ObservableObject {
                     assistantResponse: spokenText
                 ))
 
-                // Keep only the last 10 exchanges to avoid unbounded context growth
-                if conversationHistory.count > 10 {
-                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                // Keep the last 20 exchanges (40 messages) to bound context growth
+                let maximumExchangeCount = OpenClickyMemoryStore.maximumStoredExchangeCount
+                if conversationHistory.count > maximumExchangeCount {
+                    conversationHistory.removeFirst(conversationHistory.count - maximumExchangeCount)
+                }
+                if OpenClickySettings.shared.isMemoryEnabled {
+                    OpenClickyMemoryStore.saveConversationHistory(conversationHistory)
                 }
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
@@ -690,11 +775,13 @@ final class CompanionManager: ObservableObject {
 
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
-                if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let wasAlreadySpokenEarly = earlySpokenResponseText != nil
+                if !wasAlreadySpokenEarly && !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
                         try await elevenLabsTTSClient.speakText(spokenText)
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
+                        showCaptions(for: spokenText)
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                         print("⚠️ TTS error: \(error)")
@@ -766,6 +853,207 @@ final class CompanionManager: ObservableObject {
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
+    }
+
+    // MARK: - OpenClicky Extensions (drawing, agents, memory, visuals)
+
+    /// Drawing, agent hand-off, memory and visual-card instructions appended to the
+    /// original companion prompt. Verified against Claude Code: replies use these
+    /// tags exactly as described.
+    private static let companionCapabilitiesSystemPromptExtension = """
+    drawing on screen:
+    besides pointing, you can draw on the user's screen to show them things. use drawings when they genuinely help, for example circling the exact spot to click, underlining the line of text you're talking about, or an arrow from one thing to another. draw at most three shapes plus up to six labels or notes per reply. use the same screenshot pixel coordinate space as the point tag, and add :screenN for other screens. put drawing tags at the end of your reply, before the point tag. formats:
+    - [CIRCLE:x,y,radius:label] circles something
+    - [HIGHLIGHT:x,y,width,height:label] boxes a rectangular area (x,y is its top-left corner)
+    - [UNDERLINE:x1,x2,y:label] underlines text running from x1 to x2 at height y
+    - [ARROW:x1,y1,x2,y2:label] draws an arrow from the first point to the second
+    - [LABEL:x,y:text] puts a short callout tag with a leader line pointing at x,y, great for naming the parts of something (use several to label a diagram, a product photo or a machine)
+    - [NOTE:x,y:text] sticks a yellow sticky note near x,y for a warning or a key tip, like "power off first". keep notes under ten words
+
+    agents:
+    you can't click, type, or run things yourself, but you can hand work off to an agent that runs in the background on the user's mac with full tools (files, terminal, web search, and any apps the user has connected). when the user asks you to actually do something rather than explain it, like research a topic, write or edit a file, build something, organize files, or send or draft something, say one short spoken line acknowledging it (like "on it, i'll have an agent handle that") and append [AGENT:<a complete, self-contained description of the task, including any details from the screen the agent will need>]. don't use an agent for things you can answer by talking.
+
+    memory:
+    if the user tells you something about themselves that would be useful to remember in future conversations (their name, job, projects, preferences, tools they use), append [REMEMBER:<the fact, written in third person, like "the user's name is alex">]. only remember things they'd want remembered.
+
+    visual explainer cards:
+    when a picture would teach far better than words (how something works, a process or pipeline, a comparison, the structure of an idea, or the parts of a physical object), you can draw an explainer card that pops up on screen next to what you're talking about. at most one per reply, and only when it genuinely helps. your spoken reply must still make sense on its own. write the card after your spoken text, before any drawing or point tags.
+
+    diagram card format:
+    <visual kind="diagram" title="2-5 word title" x="X" y="Y" width="W" height="H">
+    <svg viewBox="0 0 W H-30" xmlns="http://www.w3.org/2000/svg">...</svg>
+    </visual>
+    - x,y is where the card's top-left corner should go, in screenshot pixel coordinates. pick empty-ish space that doesn't cover what you're explaining or pointing at. width 420-640, height 300-480.
+    - it renders as a hand-drawn whiteboard sketch on grid paper, and elements draw themselves in document order, so order them the way you'd explain out loud.
+    - style: big handwritten text (font-size 20-30, fill #2b2b2b), a bold heading at the top, boxes as rect with rx="3" stroke="#2b2b2b" stroke-width="2" and soft fills (#dbeafe blue, #fde2e2 red, #dcfce7 green, #fef3c7 yellow, #ede9fe purple), arrows as line or path with stroke="#2b2b2b" stroke-width="2" marker-end="url(#arrow)" (that marker already exists), numbered steps as small circles with a number.
+    - keep it simple and roomy: under 30 elements, no tiny text, no gradients, no images, no scripts.
+
+    3d model card format, for physical objects (machines, engines, devices, anatomy, buildings):
+    <visual kind="3d" title="2-5 word title" x="X" y="Y" width="560" height="440">
+    javascript
+    </visual>
+    - the javascript runs with these ready: THREE (three.js r160), model (a THREE.Group already in the scene, add everything to it), material(colorHex) for a nice standard material, addPart(mesh, "name") to add a clickable named part, addLabel([x,y,z], "text") for a callout label pointing at a spot, addArrow([x1,y1,z1], [x2,y2,z2], colorHex) for flow or force arrows. lights, camera framing, and drag-to-rotate are handled for you.
+    - build a recognizable simplified model from primitives (BoxGeometry, CylinderGeometry, SphereGeometry, ConeGeometry, TorusGeometry), sized roughly 2 to 6 units overall. label the 3 to 6 parts that matter for your explanation. plain javascript statements only, no imports, under 80 lines.
+    """
+
+    /// The full talk-mode system prompt, including what OpenClicky remembers about the user.
+    private func makeVoiceResponseSystemPrompt() -> String {
+        var systemPrompt = Self.companionVoiceResponseSystemPrompt + "\n" + Self.companionCapabilitiesSystemPromptExtension
+
+        if OpenClickySettings.shared.isMemoryEnabled {
+            let profileText = OpenClickyMemoryStore.readProfileText()
+            if !profileText.isEmpty {
+                systemPrompt += "\n\nwhat you already know about the user (from earlier conversations):\n\(profileText)"
+            }
+        }
+
+        let runningOrRecentAgents = agentManager.agents.prefix(5)
+        if !runningOrRecentAgents.isEmpty {
+            let agentSummaries = runningOrRecentAgents.map { agent in
+                "- \(agent.name): \(agent.taskDescription.prefix(120)) (\(agent.latestActivityText.prefix(80)))"
+            }.joined(separator: "\n")
+            systemPrompt += "\n\nagents currently on the user's screen:\n\(agentSummaries)"
+        }
+
+        return systemPrompt
+    }
+
+    /// Called on every streamed chunk. Once Claude starts a <visual> block, the
+    /// spoken part is complete, so start talking while the visual keeps generating.
+    private func speakEarlyIfVisualHasStarted(_ accumulatedResponseText: String) {
+        guard earlySpokenResponseText == nil,
+              let spokenPrefix = VisualExplainerParser.spokenPrefixBeforeVisual(in: accumulatedResponseText) else {
+            return
+        }
+
+        let prefixWithoutTags = ScreenAnnotationTagParser.parseExtraTags(from: spokenPrefix).textWithoutExtraTags
+        let speakableText = Self.parsePointingCoordinates(from: prefixWithoutTags).spokenText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !speakableText.isEmpty else { return }
+
+        earlySpokenResponseText = speakableText
+        Task {
+            do {
+                try await elevenLabsTTSClient.speakText(speakableText)
+                voiceState = .responding
+                showCaptions(for: speakableText)
+            } catch {
+                print("⚠️ Early TTS error: \(error)")
+            }
+        }
+    }
+
+    /// Shows what OpenClicky is saying next to the cursor, then fades it out
+    /// a few seconds after speech ends.
+    private func showCaptions(for spokenText: String) {
+        guard OpenClickySettings.shared.showsCaptionsWhileTalking else { return }
+        captionsOverlayManager.showOverlayAndBeginStreaming()
+        captionsOverlayManager.updateStreamingText(spokenText)
+
+        Task {
+            while elevenLabsTTSClient.isPlaying {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            captionsOverlayManager.finishStreaming()
+        }
+    }
+
+    /// Draws annotations and removes them a few seconds after OpenClicky stops talking.
+    private func showScreenAnnotations(_ newScreenAnnotations: [ScreenAnnotation]) {
+        screenAnnotationClearTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) {
+            activeScreenAnnotations = newScreenAnnotations
+        }
+
+        screenAnnotationClearTask = Task {
+            // Give TTS a moment to start, then wait for it to finish.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            while elevenLabsTTSClient.isPlaying {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            clearScreenAnnotations()
+        }
+    }
+
+    private func clearScreenAnnotations() {
+        screenAnnotationClearTask?.cancel()
+        screenAnnotationClearTask = nil
+        guard !activeScreenAnnotations.isEmpty else { return }
+        withAnimation(.easeIn(duration: 0.5)) {
+            activeScreenAnnotations = []
+        }
+    }
+
+    /// "agent, find me..." / "hey openclicky agent ..." → the task; otherwise nil.
+    static func explicitAgentTask(fromTranscript transcript: String) -> String? {
+        var remainingText = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ignorableLeadingWords = ["hey", "hi", "okay", "ok", "open clicky", "openclicky", "clicky", "heyclicky", "hey clicky"]
+        var didStripLeadingWord = true
+        while didStripLeadingWord {
+            didStripLeadingWord = false
+            for ignorableLeadingWord in ignorableLeadingWords where remainingText.lowercased().hasPrefix(ignorableLeadingWord) {
+                remainingText = String(remainingText.dropFirst(ignorableLeadingWord.count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " ,.!:").union(.whitespaces))
+                didStripLeadingWord = true
+                break
+            }
+        }
+
+        let lowercasedRemainingText = remainingText.lowercased()
+        guard lowercasedRemainingText.hasPrefix("agent") else { return nil }
+        // "agents are cool" isn't a command; require "agent" followed by a separator.
+        let textAfterAgentWord = remainingText.dropFirst("agent".count)
+        guard let firstCharacterAfterAgentWord = textAfterAgentWord.first,
+              firstCharacterAfterAgentWord == "," || firstCharacterAfterAgentWord == " " || firstCharacterAfterAgentWord == ":" else {
+            return nil
+        }
+
+        let agentTask = textAfterAgentWord.trimmingCharacters(in: CharacterSet(charactersIn: " ,.:").union(.whitespaces))
+        return agentTask.count >= 3 ? agentTask : nil
+    }
+
+    /// Launches an agent directly from an "agent, ..." voice command, with the current screen as context.
+    private func launchAgentFromVoice(taskDescription: String) {
+        currentResponseTask = Task {
+            voiceState = .processing
+            let screenCaptures = (try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()) ?? []
+            let labeledImages = screenCaptures.filter { $0.isCursorScreen }.map { capture in
+                (data: capture.imageData, label: capture.label)
+            }
+            let launchedAgent = agentManager.launchAgent(taskDescription: taskDescription, screenshotImages: labeledImages)
+            try? await elevenLabsTTSClient.speakText("on it. your \(launchedAgent.name.lowercased()) agent starts in a few seconds.")
+            voiceState = .idle
+            scheduleTransientHideIfNeeded()
+        }
+    }
+
+    private func bindDictationShortcutTransitions() {
+        dictationShortcutTransitionCancellable = globalPushToTalkShortcutMonitor
+            .dictationShortcutTransitionPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] dictationShortcutTransition in
+                guard let self else { return }
+                // Don't start dictating while a talk-mode press is in progress.
+                guard !self.globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed else { return }
+                self.dictationController.handleDictationShortcutTransition(dictationShortcutTransition)
+            }
+    }
+
+    /// Announces finished agents out loud (unless OpenClicky is busy talking).
+    private func bindAgentNotifications() {
+        _ = agentCardsPanelManager
+        agentManager.onAgentFinished = { [weak self] finishedAgent in
+            guard let self else { return }
+            NSSound(named: "Glass")?.play()
+            guard self.voiceState == .idle, !self.elevenLabsTTSClient.isPlaying else { return }
+            let summaryText = finishedAgent.finalSummaryText ?? "it's done."
+            Task {
+                try? await self.elevenLabsTTSClient.speakText("your \(finishedAgent.name.lowercased()) agent finished. \(summaryText)")
+            }
+        }
     }
 
     // MARK: - Point Tag Parsing

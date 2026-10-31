@@ -186,6 +186,9 @@ struct BlueCursorView: View {
             // Nearly transparent background (helps with compositing)
             Color.black.opacity(0.001)
 
+            // Circles, arrows, highlights, callout labels and sticky notes Claude drew
+            ScreenAnnotationLayerView(companionManager: companionManager, screenFrame: screenFrame)
+
             // Welcome speech bubble (first launch only)
             if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
                 Text(welcomeText)
