@@ -54,6 +54,20 @@ Say "agent, ..." to skip straight to an agent. Results land in `~/OpenClicky/<da
 | Email signup | FormSpark | None |
 | Agents, drawing, diagrams, 3D, dictation, memory | — | Built in, all through local Claude Code |
 
+## Download
+
+Grab **OpenClicky.dmg** from this repo's [Releases](../../releases) page (the `latest` release is rebuilt automatically from every push to `main` by `.github/workflows/build-macos.yml`).
+
+### Installing the download
+
+1. Open the DMG and drag **OpenClicky** into **Applications**.
+2. Open it. macOS will say it can't verify the developer, because the build is ad-hoc signed rather than signed with a paid Apple Developer ID. Go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**. You only need to do this once.
+   (Or in Terminal: `xattr -dr com.apple.quarantine /Applications/OpenClicky.app`)
+3. Make sure [Claude Code](https://claude.com/claude-code) is installed and you've run `claude` once to log in.
+4. Click the triangle in the menu bar, grant the permissions, pick a voice engine, and hit Start.
+
+After installing a newer build, macOS may ask for Accessibility and Screen Recording again, because each ad-hoc build has a new signature. To avoid that (and the warning in step 2), add a Developer ID certificate and notarization to the workflow.
+
 ## Requirements
 
 - macOS 14.2+

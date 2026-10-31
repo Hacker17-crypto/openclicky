@@ -1,0 +1,106 @@
+# Builds OpenClicky.app on a GitHub-hosted Mac and packages OpenClicky.dmg.
+#
+# - Every push to main: the DMG is uploaded as a workflow artifact and the
+#   "latest" pre-release is refreshed, so this link always has the newest build:
+#   https://github.com/<owner>/<repo>/releases/download/latest/OpenClicky.dmg
+# - Pushing a tag like v1.0.0: a normal release with the DMG attached.
+#
+# The app is ad-hoc signed (no Apple Developer account needed). macOS will
+# warn on first open; see the README's "Installing the download" section.
+name: Build macOS app
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26 or newer
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ]; then
+            echo "::error::This project needs Xcode 26+ (default MainActor isolation). Installed:"; ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_PATH"
+          xcodebuild -version
+
+      - name: Build OpenClicky.app (universal, ad-hoc signed)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project leanring-buddy.xcodeproj \
+            -scheme leanring-buddy \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="-" \
+            DEVELOPMENT_TEAM="" \
+            ENABLE_HARDENED_RUNTIME=NO \
+            build | tee xcodebuild.log | grep -E "error:|warning: .*deprecated|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release/OpenClicky.app || { echo "::error::Build failed, see xcodebuild.log"; tail -100 xcodebuild.log; exit 1; }
+
+      - name: Package OpenClicky.dmg
+        run: |
+          APP_PATH=build/Build/Products/Release/OpenClicky.app
+          codesign --verify --deep --strict "$APP_PATH" && echo "Signature OK"
+          mkdir -p dmg-contents
+          cp -R "$APP_PATH" dmg-contents/
+          ln -s /Applications dmg-contents/Applications
+          hdiutil create -volname "OpenClicky" -srcfolder dmg-contents -ov -format UDZO OpenClicky.dmg
+          shasum -a 256 OpenClicky.dmg | tee OpenClicky.dmg.sha256
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenClicky-macOS
+          path: |
+            OpenClicky.dmg
+            OpenClicky.dmg.sha256
+
+      - name: Refresh "latest" pre-release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest OpenClicky.dmg OpenClicky.dmg.sha256 \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "OpenClicky (latest build)" \
+            --notes "Built from ${GITHUB_SHA::7}. Drag OpenClicky to Applications. First open: System Settings → Privacy & Security → Open Anyway (the app is ad-hoc signed). Requires macOS 14.2+ and Claude Code installed and logged in."
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" OpenClicky.dmg OpenClicky.dmg.sha256 \
+            --title "OpenClicky $GITHUB_REF_NAME" \
+            --notes "Drag OpenClicky to Applications. First open: System Settings → Privacy & Security → Open Anyway (the app is ad-hoc signed). Requires macOS 14.2+ and Claude Code installed and logged in."
