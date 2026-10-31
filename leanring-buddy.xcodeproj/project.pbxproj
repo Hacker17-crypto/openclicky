@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AA00BB032F6500030039DA55 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB022F6500020039DA55 /* Sparkle */; };
+		AA00BB092F6500090039DA55 /* WhisperFramework in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB082F6500080039DA55 /* WhisperFramework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA00BB032F6500030039DA55 /* Sparkle in Frameworks */,
+				AA00BB092F6500090039DA55 /* WhisperFramework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +120,7 @@
 			name = "leanring-buddy";
 			packageProductDependencies = (
 				AA00BB022F6500020039DA55 /* Sparkle */,
+				AA00BB082F6500080039DA55 /* WhisperFramework */,
 			);
 			productName = "leanring-buddy";
 			productReference = 28F22CBF2F56440300A0FC59 /* OpenClicky.app */;
@@ -203,6 +206,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AA00BB012F6500010039DA55 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				AA00BB072F6500070039DA55 /* XCLocalSwiftPackageReference "Packages/WhisperFramework" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 28F22CC02F56440300A0FC59 /* Products */;
@@ -587,6 +591,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		AA00BB072F6500070039DA55 /* XCLocalSwiftPackageReference "Packages/WhisperFramework" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/WhisperFramework;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		AA00BB012F6500010039DA55 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -603,6 +614,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA00BB012F6500010039DA55 /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		AA00BB082F6500080039DA55 /* WhisperFramework */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00BB072F6500070039DA55 /* XCLocalSwiftPackageReference "Packages/WhisperFramework" */;
+			productName = WhisperFramework;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

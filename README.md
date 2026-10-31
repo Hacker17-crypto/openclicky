@@ -35,7 +35,7 @@ Say "agent, ..." to skip straight to an agent. Results land in `~/OpenClicky/<da
 
 **Choose how it hears you.** On first launch OpenClicky checks which speech-to-text engines your Mac has and asks you to pick one (change it anytime in Settings → Transcription):
 - **Apple SpeechAnalyzer**: Apple's newest on-device model (macOS 26+). Downloads its language model once.
-- **Whisper (whisper.cpp)**: uses **every Whisper model already on your Mac**, including ones downloaded by **Superwhisper**, MacWhisper, VoiceInk, Buzz, Hugging Face tools, Homebrew or your Downloads folder, plus anything Spotlight finds. Models are recognized by their file header, not their name, so renamed models are labeled correctly ("Large v3 Turbo q5_0, from Superwhisper"). You can also download Base, Small or Large v3 Turbo in one click. Runs through `whisper-cli` (`brew install whisper-cpp`), or inside the app if the bundled whisper.cpp framework is enabled (see `Packages/`). Models in formats whisper.cpp can't run (Core ML, Parakeet, ONNX) are listed so you know why they're not offered.
+- **Whisper (whisper.cpp)**: uses **every Whisper model already on your Mac**, including ones downloaded by **Superwhisper**, MacWhisper, VoiceInk, Buzz, Hugging Face tools, Homebrew or your Downloads folder, plus anything Spotlight finds. Models are recognized by their file header, not their name, so renamed models are labeled correctly ("Large v3 Turbo q5_0, from Superwhisper"). You can also download Base, Small or Large v3 Turbo in one click. Runs **inside OpenClicky** on the GPU (Metal), using the official whisper.cpp framework bundled as a Swift package (`Packages/WhisperFramework`, pinned by checksum), so there's nothing extra to install. The model stays loaded between presses. Models in formats whisper.cpp can't run (Core ML, Parakeet, ONNX) are listed so you know why they're not offered.
 - **Apple Speech**: built in, on-device, zero setup.
 - AssemblyAI / OpenAI (cloud): only listed if you added your own key.
 
@@ -58,6 +58,7 @@ Say "agent, ..." to skip straight to an agent. Results land in `~/OpenClicky/<da
 
 - macOS 14.2+
 - Xcode 26+ (the project uses Swift's default-MainActor isolation)
+- Internet on the first build, so Xcode can fetch Sparkle and the whisper.cpp framework (about 63 MB)
 - [Claude Code](https://claude.com/claude-code), installed and logged in. Run `claude` once in Terminal and finish login.
 
 ## Setup
